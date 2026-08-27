@@ -1,5 +1,6 @@
 /* kontaxis 2015-10-31 */
 
+#include <arpa/inet.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdio.h>
@@ -28,6 +29,7 @@ uint8_t istty_stderr;
 /* References:
  *   netinet/ether.h
  *   netinet/ip.h
+ *   netinet/ip6.h
  *   netinet/tcp.h
  *   netinet/udp.h
  */
@@ -43,7 +45,8 @@ struct ether_header
   uint16_t ether_type;
 } __attribute__ ((__packed__));
 
-#define ETHERTYPE_IP 0x0800
+#define ETHERTYPE_IP   0x0800
+#define ETHERTYPE_IPV6 0x86DD
 
 #if !__NO_ETHERNET__
 #define SIZE_ETHERNET sizeof(struct ether_header)
@@ -51,7 +54,7 @@ struct ether_header
 #define SIZE_ETHERNET 0
 #endif
 
-/* IP */
+/* IPv4 */
 
 struct my_iphdr
 {
@@ -70,15 +73,51 @@ struct my_iphdr
 } __attribute__ ((__packed__));
 
 #define MIN_SIZE_IP (sizeof(struct my_iphdr))
-#define MAX_SIZE_IP (0xF * sizeof(uint32_t))
 
 #define IPVERSION 4
 
+/* IPv6 */
+
+struct my_ip6hdr
+{
+  uint8_t  vcf[4];       /* version(4) + traffic class(8) + flow label(20) */
+  uint16_t payload_len;
+  uint8_t  next_hdr;
+  uint8_t  hop_limit;
+  uint8_t  saddr[16];
+  uint8_t  daddr[16];
+} __attribute__ ((__packed__));
+
+#define MIN_SIZE_IP6 (sizeof(struct my_ip6hdr))
+
+/* Protocol / next-header numbers */
+
 #ifndef IPPROTO_TCP
-#define IPPROTO_TCP  6
+#define IPPROTO_TCP       6
 #endif
 #ifndef IPPROTO_UDP
-#define IPPROTO_UDP 17
+#define IPPROTO_UDP      17
+#endif
+#ifndef IPPROTO_HOPOPTS
+#define IPPROTO_HOPOPTS   0   /* IPv6 Hop-by-Hop Options */
+#endif
+#ifndef IPPROTO_ROUTING
+#define IPPROTO_ROUTING  43   /* IPv6 Routing Header */
+#endif
+#ifndef IPPROTO_FRAGMENT
+#define IPPROTO_FRAGMENT 44   /* IPv6 Fragment Header */
+#endif
+#ifndef IPPROTO_AH
+#define IPPROTO_AH       51   /* Authentication Header */
+#endif
+#ifndef IPPROTO_ESP
+#define IPPROTO_ESP      50   /* Encapsulating Security Payload */
+#endif
+#ifndef IPPROTO_DSTOPTS
+#define IPPROTO_DSTOPTS  60   /* IPv6 Destination Options */
+#endif
+#ifndef IPPROTO_MH
+#define IPPROTO_MH      135   /* IPv6 Mobility Header */
 #endif
 
 /* TCP */
@@ -106,7 +145,6 @@ struct my_tcphdr
 } __attribute__ ((__packed__));
 
 #define MIN_SIZE_TCP (sizeof(struct my_tcphdr))
-#define MAX_SIZE_TCP (0xF * sizeof(uint32_t))
 
 /* UDP */
 
@@ -136,17 +174,87 @@ struct udphdr
 
 
 /* -------------------------------------------------------------------------
- * Per-packet context
+ * IPv6 extension header walker
  *
- * Replaces the previous scatter of file-scope globals.  A single instance
- * lives in main() and is passed to pcap_loop as the user pointer; a static
- * pointer (g_ctx) is set at the start of each callback so that sni_handler
- * (which has a fixed signature imposed by the API) can reach it.
+ * Walks the extension header chain starting at 'offset' bytes into 'packet',
+ * with 'next_hdr' being the first next-header value to examine.
+ *
+ * On success: sets *transport_offset and returns IPPROTO_TCP or IPPROTO_UDP.
+ * On failure: returns -1 (unrecognised, encrypted, or non-first fragment).
+ * -------------------------------------------------------------------------
+ */
+static int ip6_skip_exthdr(const uint8_t *packet, uint32_t caplen,
+	uint32_t offset, uint8_t next_hdr, uint32_t *transport_offset)
+{
+	while (1) {
+		switch (next_hdr) {
+			case IPPROTO_TCP:
+			case IPPROTO_UDP:
+				*transport_offset = offset;
+				return next_hdr;
+
+			case IPPROTO_HOPOPTS:
+			case IPPROTO_ROUTING:
+			case IPPROTO_DSTOPTS:
+			case IPPROTO_MH:
+				/* Generic extension header.
+				 * Byte 0: next header.  Byte 1: length in 8-octet units,
+				 * not counting the first 8 bytes.
+				 * Total size = (len + 1) * 8.
+				 */
+				if (offset + 2 > caplen) return -1;
+				next_hdr = packet[offset];
+				offset  += (uint32_t)(packet[offset + 1] + 1) * 8;
+				if (offset > caplen) return -1;
+				break;
+
+			case IPPROTO_FRAGMENT: {
+				/* Fragment header is always 8 bytes.
+				 * Bytes 2-3 hold the fragment offset (high 13 bits) + flags.
+				 * If offset != 0 this is not the first fragment; the
+				 * transport header is absent.
+				 */
+				if (offset + 8 > caplen) return -1;
+				uint16_t frag_off =
+					(uint16_t)((packet[offset + 2] << 8) | packet[offset + 3])
+					& 0xFFF8;
+				if (frag_off != 0) return -1;
+				next_hdr = packet[offset];
+				offset  += 8;
+				break;
+			}
+
+			case IPPROTO_AH:
+				/* Authentication Header.
+				 * Byte 1: payload length in 4-octet units minus 2.
+				 * Total size = (len + 2) * 4.
+				 */
+				if (offset + 2 > caplen) return -1;
+				next_hdr = packet[offset];
+				offset  += (uint32_t)(packet[offset + 1] + 2) * 4;
+				if (offset > caplen) return -1;
+				break;
+
+			case IPPROTO_ESP:
+			default:
+				/* Cannot parse through ESP (encrypted).
+				 * Unknown next-header: bail out.
+				 */
+				return -1;
+		}
+	}
+}
+
+
+/* -------------------------------------------------------------------------
+ * Per-packet context
  * -------------------------------------------------------------------------
  */
 
 struct packet_ctx {
-	struct my_iphdr   *ip;
+	struct my_iphdr   *ip;    /* non-NULL for IPv4 packets */
+	struct my_ip6hdr  *ip6;   /* non-NULL for IPv6 packets */
+	uint8_t            is_ipv6;
 	uint16_t           src_port;
 	uint16_t           dst_port;
 	uint8_t            flag_sni_available;
@@ -154,7 +262,7 @@ struct packet_ctx {
 	uint8_t            opt_quiet;
 	uint8_t            opt_timestamp;
 	uint8_t            opt_json;
-	const char        *current_proto; /* "TLS" or "HTTP", set before each engine */
+	const char        *current_proto;
 };
 
 static struct packet_ctx *g_ctx;
@@ -167,47 +275,59 @@ static void timestamp_now(char *buf, size_t bufsz)
 	strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%SZ", gmtime_r(&t, &tmbuf));
 }
 
+/*
+ * Format the source or destination IP address into buf.
+ * IPv4: "w.x.y.z"
+ * IPv6: "[addr]"  (brackets so "addr:port" is unambiguous)
+ */
+static void fmt_addr(char *buf, size_t bufsz,
+	const struct packet_ctx *ctx, int src)
+{
+	if (ctx->ip6) {
+		char addr[INET6_ADDRSTRLEN];
+		inet_ntop(AF_INET6,
+			src ? (const void *)ctx->ip6->saddr
+			    : (const void *)ctx->ip6->daddr,
+			addr, sizeof(addr));
+		snprintf(buf, bufsz, "[%s]", addr);
+	} else {
+		const uint8_t *a = src
+			? (const uint8_t *)&ctx->ip->saddr
+			: (const uint8_t *)&ctx->ip->daddr;
+		snprintf(buf, bufsz, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+	}
+}
+
 int sni_handler(uint8_t *host_name, uint16_t host_name_length)
 {
 	struct packet_ctx *ctx = g_ctx;
+	char src_addr[INET6_ADDRSTRLEN + 2]; /* +2 for [ ] */
+	char dst_addr[INET6_ADDRSTRLEN + 2];
 	char ts[32];
+
+	fmt_addr(src_addr, sizeof(src_addr), ctx, 1);
+	fmt_addr(dst_addr, sizeof(dst_addr), ctx, 0);
 
 	if (ctx->opt_json) {
 		timestamp_now(ts, sizeof(ts));
 		fprintf(stdout,
 			"{\"time\":\"%s\",\"proto\":\"%s\","
-			"\"src\":\"%u.%u.%u.%u:%u\","
-			"\"dst\":\"%u.%u.%u.%u:%u\","
+			"\"src\":\"%s:%u\","
+			"\"dst\":\"%s:%u\","
 			"\"host\":\"%.*s\"}\n",
 			ts,
 			ctx->current_proto,
-			*(((uint8_t *)&(ctx->ip->saddr)) + 0),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 1),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 2),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 3),
-			n16toh16(ctx->src_port),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 0),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 1),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 2),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 3),
-			n16toh16(ctx->dst_port),
+			src_addr, n16toh16(ctx->src_port),
+			dst_addr, n16toh16(ctx->dst_port),
 			(int)host_name_length, (char *)host_name);
 	} else {
 		if (ctx->opt_timestamp) {
 			timestamp_now(ts, sizeof(ts));
 			fprintf(stdout, "%s ", ts);
 		}
-		fprintf(stdout, "%u.%u.%u.%u:%u -> %u.%u.%u.%u:[%u] ",
-			*(((uint8_t *)&(ctx->ip->saddr)) + 0),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 1),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 2),
-			*(((uint8_t *)&(ctx->ip->saddr)) + 3),
-			n16toh16(ctx->src_port),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 0),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 1),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 2),
-			*(((uint8_t *)&(ctx->ip->daddr)) + 3),
-			n16toh16(ctx->dst_port));
+		fprintf(stdout, "%s:%u -> %s:[%u] ",
+			src_addr, n16toh16(ctx->src_port),
+			dst_addr, n16toh16(ctx->dst_port));
 		CPRINT_STDOUT(C_RED_LIGHT, "%u:%.*s\n", host_name_length,
 			(int)host_name_length, (char *)host_name);
 	}
@@ -229,8 +349,8 @@ void my_pcap_handler(uint8_t *user, const struct pcap_pkthdr *header,
 	struct my_tcphdr *tcp;
 	struct udphdr    *udp;
 
-	uint8_t  *payload;
-	uint16_t  payload_length;
+	uint8_t  *payload       = NULL;
+	uint16_t  payload_length = 0;
 
 	uint16_t r;
 
@@ -242,119 +362,211 @@ void my_pcap_handler(uint8_t *user, const struct pcap_pkthdr *header,
 		return;
 	}
 
+	/* -----------------------------------------------------------------
+	 * Determine network-layer protocol (IPv4 or IPv6).
+	 * ----------------------------------------------------------------- */
+
 #if !__NO_ETHERNET__
 	if (header->caplen < SIZE_ETHERNET) {
 		return;
 	}
 
-	ether = (struct ether_header *) packet;
-	if (unlikely(ether->ether_type != h16ton16(ETHERTYPE_IP))) {
+	ether = (struct ether_header *)packet;
+
+	if (ether->ether_type == h16ton16(ETHERTYPE_IP)) {
+		ctx->is_ipv6 = 0;
+	} else if (ether->ether_type == h16ton16(ETHERTYPE_IPV6)) {
+		ctx->is_ipv6 = 1;
+	} else {
 #if __DEBUG__
 		fprintf(stderr,
-			"WARNING: ether->ether_type != ETHERTYPE_IP. Ignoring.\n");
+			"WARNING: ether_type 0x%04x is not IP or IPv6. Ignoring.\n",
+			n16toh16(ether->ether_type));
 #endif
 		return;
 	}
-#endif
 
-	if (header->caplen < SIZE_ETHERNET + MIN_SIZE_IP) {
+#else /* __NO_ETHERNET__: raw IP, check version nibble */
+
+	if (header->caplen < 1) {
 		return;
 	}
+	{
+		uint8_t ver = packet[0] >> 4;
+		if (ver == 4)      ctx->is_ipv6 = 0;
+		else if (ver == 6) ctx->is_ipv6 = 1;
+		else               return;
+	}
 
-	ctx->ip = (struct my_iphdr *)(packet + SIZE_ETHERNET);
-	if (unlikely(IP_V(ctx->ip) != IPVERSION)) {
+#endif /* __NO_ETHERNET__ */
+
+	/* -----------------------------------------------------------------
+	 * Parse the IP or IPv6 header, then the transport header.
+	 * ----------------------------------------------------------------- */
+
+	if (!ctx->is_ipv6) {
+		/* IPv4 */
+
+		if (header->caplen < SIZE_ETHERNET + MIN_SIZE_IP) {
+			return;
+		}
+
+		ctx->ip  = (struct my_iphdr *)(packet + SIZE_ETHERNET);
+		ctx->ip6 = NULL;
+
+		if (unlikely(IP_V(ctx->ip) != 4)) {
 #if __DEBUG__
-		fprintf(stderr, "WARNING: IP_V(ip) != 4. Ignoring.\n");
+			fprintf(stderr, "WARNING: IP version != 4. Ignoring.\n");
 #endif
-		return;
-	}
+			return;
+		}
 
-	switch (ctx->ip->protocol) {
-		case IPPROTO_TCP: {
-				if (header->caplen <
-					SIZE_ETHERNET + (IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					MIN_SIZE_TCP) {
-					return;
+		switch (ctx->ip->protocol) {
+			case IPPROTO_TCP: {
+					if (header->caplen <
+						SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) + MIN_SIZE_TCP) {
+						return;
+					}
+					tcp = (struct my_tcphdr *)
+						(packet + SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)));
+					ctx->src_port = tcp->source;
+					ctx->dst_port = tcp->dest;
+
+					if (header->caplen < SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+						(TCP_OFF(tcp) * sizeof(uint32_t))) {
+						return;
+					}
+					payload = (uint8_t *)
+						(packet + SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+						(TCP_OFF(tcp) * sizeof(uint32_t)));
+					payload_length = header->caplen - SIZE_ETHERNET -
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) -
+						(TCP_OFF(tcp) * sizeof(uint32_t));
 				}
+				break;
+			case IPPROTO_UDP: {
+					if (header->caplen <
+						SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) + MIN_SIZE_UDP) {
+						return;
+					}
+					udp = (struct udphdr *)
+						(packet + SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)));
+					ctx->src_port = udp->source;
+					ctx->dst_port = udp->dest;
 
-				tcp = (struct my_tcphdr *)
-					(packet + SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)));
-				ctx->src_port = tcp->source;
-				ctx->dst_port = tcp->dest;
-
-				if (header->caplen < SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					(TCP_OFF(tcp) * sizeof(uint32_t))) {
-					return;
+					if (header->caplen < SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+						sizeof(struct udphdr)) {
+						return;
+					}
+					payload = (uint8_t *)
+						(packet + SIZE_ETHERNET +
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+						sizeof(struct udphdr));
+					payload_length = header->caplen - SIZE_ETHERNET -
+						(IP_HL(ctx->ip) * sizeof(uint32_t)) -
+						sizeof(struct udphdr);
 				}
-
-				payload = (uint8_t *)
-					(packet + SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					(TCP_OFF(tcp) * sizeof(uint32_t)));
-				payload_length = header->caplen - SIZE_ETHERNET -
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) -
-					(TCP_OFF(tcp) * sizeof(uint32_t));
-			}
-			break;
-		case IPPROTO_UDP: {
-				if (header->caplen <
-					SIZE_ETHERNET + (IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					MIN_SIZE_UDP) {
-					return;
-				}
-				udp = (struct udphdr *)
-					(packet + SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)));
-				ctx->src_port = udp->source;
-				ctx->dst_port = udp->dest;
-
-				if (header->caplen < SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					sizeof(struct udphdr)) {
-					return;
-				}
-
-				payload = (uint8_t *)
-					(packet + SIZE_ETHERNET +
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
-					sizeof(struct udphdr));
-				payload_length = header->caplen - SIZE_ETHERNET -
-					(IP_HL(ctx->ip) * sizeof(uint32_t)) -
-					sizeof(struct udphdr);
-			}
-			break;
-		default:
-				ctx->src_port  = 0;
-				ctx->dst_port  = 0;
-				payload        = NULL;
-				payload_length = 0;
+				break;
+			default:
 #if __DEBUG__
-			fprintf(stderr, "WARNING: ip->protocol == %u. Ignoring.\n",
-				ctx->ip->protocol);
+				fprintf(stderr, "WARNING: ip->protocol == %u. Ignoring.\n",
+					ctx->ip->protocol);
 #endif
-			break;
+				return;
+		}
+
+	} else {
+		/* IPv6 */
+
+		uint32_t transport_offset;
+		int proto;
+
+		if (header->caplen < SIZE_ETHERNET + MIN_SIZE_IP6) {
+			return;
+		}
+
+		ctx->ip6 = (struct my_ip6hdr *)(packet + SIZE_ETHERNET);
+		ctx->ip  = NULL;
+
+		proto = ip6_skip_exthdr(packet, header->caplen,
+			(uint32_t)(SIZE_ETHERNET + MIN_SIZE_IP6),
+			ctx->ip6->next_hdr,
+			&transport_offset);
+
+		if (proto < 0) {
+#if __DEBUG__
+			fprintf(stderr,
+				"WARNING: IPv6 extension header walk failed. Ignoring.\n");
+#endif
+			return;
+		}
+
+		switch (proto) {
+			case IPPROTO_TCP: {
+					if (header->caplen < transport_offset + MIN_SIZE_TCP) {
+						return;
+					}
+					tcp = (struct my_tcphdr *)(packet + transport_offset);
+					ctx->src_port = tcp->source;
+					ctx->dst_port = tcp->dest;
+
+					if (header->caplen < transport_offset +
+						(TCP_OFF(tcp) * sizeof(uint32_t))) {
+						return;
+					}
+					payload = (uint8_t *)
+						(packet + transport_offset +
+						(TCP_OFF(tcp) * sizeof(uint32_t)));
+					payload_length = header->caplen - transport_offset -
+						(TCP_OFF(tcp) * sizeof(uint32_t));
+				}
+				break;
+			case IPPROTO_UDP: {
+					if (header->caplen < transport_offset + MIN_SIZE_UDP) {
+						return;
+					}
+					udp = (struct udphdr *)(packet + transport_offset);
+					ctx->src_port = udp->source;
+					ctx->dst_port = udp->dest;
+
+					if (header->caplen <
+						transport_offset + sizeof(struct udphdr)) {
+						return;
+					}
+					payload = (uint8_t *)
+						(packet + transport_offset + sizeof(struct udphdr));
+					payload_length = header->caplen - transport_offset -
+						sizeof(struct udphdr);
+				}
+				break;
+			default:
+				return;
+		}
 	}
 
-	/* Save to dump file (all BPF-matched packets, regardless of parse result). */
+	/* Save to dump file (all BPF-matched packets). */
 	if (ctx->pcap_dumper_handle) {
 		pcap_dump((u_char *)ctx->pcap_dumper_handle, header, packet);
 	}
 
 #if __DEBUG__
-	fprintf(stderr, "%u.%u.%u.%u:%u -> %u.%u.%u.%u:[%u] (payload:%u)\n",
-		*(((uint8_t *)&(ctx->ip->saddr)) + 0),
-		*(((uint8_t *)&(ctx->ip->saddr)) + 1),
-		*(((uint8_t *)&(ctx->ip->saddr)) + 2),
-		*(((uint8_t *)&(ctx->ip->saddr)) + 3),
-		n16toh16(ctx->src_port),
-		*(((uint8_t *)&(ctx->ip->daddr)) + 0),
-		*(((uint8_t *)&(ctx->ip->daddr)) + 1),
-		*(((uint8_t *)&(ctx->ip->daddr)) + 2),
-		*(((uint8_t *)&(ctx->ip->daddr)) + 3),
-		n16toh16(ctx->dst_port),
-		payload_length);
+	{
+		char src_addr[INET6_ADDRSTRLEN + 2];
+		char dst_addr[INET6_ADDRSTRLEN + 2];
+		fmt_addr(src_addr, sizeof(src_addr), ctx, 1);
+		fmt_addr(dst_addr, sizeof(dst_addr), ctx, 0);
+		fprintf(stderr, "%s:%u -> %s:[%u] (payload:%u)\n",
+			src_addr, n16toh16(ctx->src_port),
+			dst_addr, n16toh16(ctx->dst_port),
+			payload_length);
+	}
 #endif
 
 	if (payload_length == 0 || payload == NULL) {
@@ -389,13 +601,6 @@ void my_pcap_handler(uint8_t *user, const struct pcap_pkthdr *header,
 
 /* -------------------------------------------------------------------------
  * Signal handling
- *
- * g_stop is set by the signal handler.  pcap_breakloop is also called
- * (it just sets a flag inside the pcap handle) so pcap_loop returns
- * promptly rather than waiting for the next batch timeout.
- *
- * SIGSEGV is intentionally NOT handled here; a real segfault should
- * terminate the process and produce a core dump for debugging.
  * -------------------------------------------------------------------------
  */
 
@@ -415,7 +620,8 @@ static void signal_handler(int signum)
 #define PCAP_TIMEOUT 1000
 
 #define BPF_DEFAULT \
-	"ip and tcp and (tcp[tcpflags] & tcp-push == tcp-push) and " \
+	"(ip or ip6) and tcp and " \
+	"(tcp[tcpflags] & tcp-push == tcp-push) and " \
 	"(dst port 80 or dst port 443)"
 #define BPF bpf_s
 #define BPF_OPTIMIZE 1
