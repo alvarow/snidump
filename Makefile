@@ -1,4 +1,19 @@
-.PHONY: all debug clean
+.PHONY: all debug clean install uninstall
+
+# Installation prefix — override with: make install PREFIX=/usr
+PREFIX  ?= /usr/local
+DESTDIR ?=
+
+BINDIR  = $(DESTDIR)$(PREFIX)/bin
+DOCDIR  = $(DESTDIR)$(PREFIX)/share/doc/snidump
+CONTRIB_SYSTEMD = $(DESTDIR)/etc/systemd/system
+CONTRIB_LOGROTATE = $(DESTDIR)/etc/logrotate.d
+CONTRIB_RC = $(DESTDIR)/usr/local/etc/rc.d
+
+INSTALL         ?= install
+INSTALL_PROGRAM ?= $(INSTALL) -m 755
+INSTALL_DATA    ?= $(INSTALL) -m 644
+INSTALL_DIR     ?= $(INSTALL) -d -m 755
 
 all: bin/snidump bin/snidump_noether
 
@@ -33,6 +48,25 @@ bin/snidump_noether_dbg: src/*
 		src/snidump.c src/tls.c src/http.c \
 		-lpcap -lpcre \
 		-o bin/snidump_noether_dbg
+
+install: all
+	$(INSTALL_DIR) $(BINDIR)
+	$(INSTALL_PROGRAM) bin/snidump         $(BINDIR)/snidump
+	$(INSTALL_PROGRAM) bin/snidump_noether $(BINDIR)/snidump_noether
+	$(INSTALL_DIR) $(DOCDIR)
+	$(INSTALL_DATA) README.md USAGE.md HACKING.md TODO.md $(DOCDIR)/
+	@echo ""
+	@echo "Binaries installed to $(BINDIR)."
+	@echo ""
+	@echo "Service / rotation files are NOT installed automatically."
+	@echo "Install them manually from contrib/ as needed:"
+	@echo "  Linux   : contrib/snidump.service   -> /etc/systemd/system/"
+	@echo "            contrib/snidump.logrotate -> /etc/logrotate.d/snidump"
+	@echo "  FreeBSD : contrib/snidump.rc        -> /usr/local/etc/rc.d/snidump"
+
+uninstall:
+	rm -f  $(BINDIR)/snidump $(BINDIR)/snidump_noether
+	rm -rf $(DOCDIR)
 
 clean:
 	rm -rf bin
