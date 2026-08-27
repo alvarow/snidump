@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# FreeBSD rc.d script for snidump
+#
+# Install:
+#   cp snidump.rc /usr/local/etc/rc.d/snidump
+#   chmod +x /usr/local/etc/rc.d/snidump
+#
+# /etc/rc.conf variables:
+#   snidump_enable="YES"           # required to start at boot
+#   snidump_interface="em0"        # network interface to capture on
+#   snidump_flags="-q -j"          # extra flags passed to snidump
+#   snidump_logfile="/var/log/snidump/hosts.jsonl"
+#   snidump_pidfile="/var/run/snidump.pid"
+#
+# Usage:
+#   service snidump start|stop|restart|status
+#
+# Log rotation — add to /etc/newsyslog.conf:
+#   /var/log/snidump/hosts.jsonl  snidump:snidump  640  30  *  @T00  CZ
+
+# PROVIDE: snidump
+# REQUIRE: NETWORK
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="snidump"
+rcvar="snidump_enable"
+
+load_rc_config "${name}"
+
+: ${snidump_enable:="NO"}
+: ${snidump_interface:="em0"}
+: ${snidump_flags:="-q -j"}
+: ${snidump_logfile:="/var/log/snidump/hosts.jsonl"}
+: ${snidump_pidfile:="/var/run/${name}.pid"}
+
+pidfile="${snidump_pidfile}"
+
+# daemon(8) wraps the process: handles daemonization, PID file, and
+# automatic restart (-r) on unexpected exit.
+command="/usr/sbin/daemon"
+command_args="-p ${snidump_pidfile} -r \
+    -o ${snidump_logfile} \
+    /usr/local/bin/snidump ${snidump_flags} -i ${snidump_interface}"
+
+start_precmd="snidump_precmd"
+
+snidump_precmd()
+{
+    if [ ! -d "$(dirname ${snidump_logfile})" ]; then
+        install -d -o snidump -g snidump -m 750 \
+            "$(dirname ${snidump_logfile})"
+    fi
+}
+
+run_rc_command "$1"

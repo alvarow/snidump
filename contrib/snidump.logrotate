@@ -1,0 +1,18 @@
+# logrotate configuration for snidump
+#
+# Install:
+#   cp snidump.logrotate /etc/logrotate.d/snidump
+#
+# snidump holds its log file open via systemd's StandardOutput=append: and
+# does not support SIGHUP-based log re-open, so copytruncate is required.
+
+/var/log/snidump/hosts.jsonl {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 snidump snidump
+}

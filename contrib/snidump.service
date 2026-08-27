@@ -1,0 +1,43 @@
+[Unit]
+Description=SNI and HTTP Host header extractor
+Documentation=file:/usr/local/share/doc/snidump/USAGE.md
+After=network.target
+
+[Service]
+# --- binary and arguments ---------------------------------------------------
+# Adjust the interface (-i) to match your system.
+# -q suppresses startup banners so only hostname events reach the log.
+# -j emits one JSON object per line (includes timestamp and protocol).
+ExecStart=stdbuf -oL /usr/local/bin/snidump -q -j -i eth0
+
+# --- output -----------------------------------------------------------------
+# Hostname events (stdout) go to a dedicated log file.
+# Service errors (stderr) go to the systemd journal; query with:
+#   journalctl -u snidump
+StandardOutput=append:/var/log/snidump/hosts.jsonl
+StandardError=journal
+
+# --- privilege --------------------------------------------------------------
+# Run as an unprivileged user; CAP_NET_RAW is the only capability needed for
+# live capture.  Remove AmbientCapabilities and set User=root if your kernel
+# or libpcap version does not support capability-based capture.
+User=snidump
+Group=snidump
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# --- hardening --------------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+# Allow snidump to write only to its log directory.
+ReadWritePaths=/var/log/snidump
+
+# --- restart ----------------------------------------------------------------
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
