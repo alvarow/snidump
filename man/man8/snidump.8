@@ -1,0 +1,278 @@
+.Dd August 27, 2026
+.Dt SNIDUMP 8
+.Os
+.Sh NAME
+.Nm snidump
+.Nd extract TLS SNI and HTTP Host headers from network traffic
+.Sh SYNOPSIS
+.Nm
+.Op Fl hpqtj
+.Op Fl f Ar bpf
+.Fl i Ar interface
+.Op Fl w Ar dump.pcap
+.Nm
+.Op Fl hpqtj
+.Op Fl f Ar bpf
+.Fl r Ar trace.pcap
+.Op Fl w Ar dump.pcap
+.Sh DESCRIPTION
+.Nm
+captures network traffic and extracts hostnames from two sources:
+.Bl -bullet -compact
+.It
+The
+.Em server_name
+extension (SNI) of TLS ClientHello handshake messages
+.Pq RFC 4366 .
+.It
+The
+.Em Host
+request-header field of plaintext HTTP/1.1 and HTTP/1.0 requests
+.Pq RFC 2616 .
+.El
+.Pp
+Input is either a live network interface or a previously recorded PCAP file.
+Both IPv4 and IPv6 are supported.
+IPv6 extension headers (Hop-by-Hop, Routing, Destination Options, Fragment,
+Authentication Header) are walked transparently to locate the transport layer.
+.Pp
+Exactly one of
+.Fl i
+or
+.Fl r
+must be supplied.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl i Ar interface
+Capture live traffic from
+.Ar interface .
+Requires
+.Sy CAP_NET_RAW
+on Linux or root on FreeBSD.
+.It Fl r Ar trace.pcap
+Read packets from
+.Ar trace.pcap
+instead of a live interface.
+No special privileges are required.
+.It Fl f Ar bpf
+Override the default BPF capture filter with
+.Ar bpf .
+See
+.Sx DEFAULT BPF FILTER
+and
+.Xr pcap-filter 7
+for syntax.
+.It Fl p
+Enable promiscuous mode.
+Only meaningful with
+.Fl i .
+.It Fl w Ar dump.pcap
+Write all packets that match the BPF filter to
+.Ar dump.pcap
+in standard pcap format.
+.It Fl q
+Quiet mode.
+Suppress all informational output
+.Pq PID, interface, BPF string, statistics, etc. .
+Only hostname events are written to stdout.
+Recommended when the output is piped to another program or redirected to a log file.
+.It Fl t
+Prefix each output line with a UTC timestamp in ISO\ 8601 format
+.Pq Sy YYYY-MM-DDThh:mm:ssZ .
+.It Fl j
+Emit one JSON object per line instead of plain text
+.Pq NDJSON / JSON\ Lines format .
+Each object includes the timestamp, protocol, source endpoint, destination
+endpoint, and hostname.
+This flag implies timestamped output.
+.It Fl h
+Print a usage summary to stderr and exit.
+.El
+.Sh OUTPUT FORMATS
+.Ss Plain text (default)
+.Bd -literal -offset indent
+<src-addr>:<src-port> -> <dst-addr>:[<dst-port>] <len>:<hostname>
+.Ed
+.Pp
+IPv4 example:
+.Bd -literal -offset indent
+192.168.1.10:52001 -> 140.82.121.4:[443] 14:www.github.com
+.Ed
+.Pp
+IPv6 addresses are enclosed in brackets to delimit them from the port:
+.Bd -literal -offset indent
+[2001:db8::1]:52001 -> [2001:4860::1]:[443] 14:www.google.com
+.Ed
+.Pp
+The destination port appears in square brackets.
+The length prefix is the byte-length of the SNI value (for TLS) or the
+Host header value (for HTTP).
+.Pp
+Informational messages and error diagnostics are written to stderr.
+Hostname events are always written to stdout.
+.Ss With Fl t No (timestamp)
+.Bd -literal -offset indent
+2026-08-27T14:23:01Z 192.168.1.10:52001 -> 140.82.121.4:[443] 14:www.github.com
+.Ed
+.Ss With Fl j No (JSON)
+.Bd -literal -offset indent
+{"time":"2026-08-27T14:23:01Z","proto":"TLS",
+ "src":"192.168.1.10:52001","dst":"140.82.121.4:443",
+ "host":"www.github.com"}
+.Ed
+.Pp
+Fields:
+.Bl -tag -width "proto" -compact
+.It Sy time
+UTC timestamp in ISO\ 8601 format.
+.It Sy proto
+.Sq TLS
+or
+.Sq HTTP .
+.It Sy src , dst
+Endpoint in
+.Sq address:port
+form.
+IPv6 addresses are bracketed.
+.It Sy host
+The extracted hostname.
+.El
+.Sh DEFAULT BPF FILTER
+.Bd -literal -offset indent
+(ip or ip6) and tcp and
+(tcp[tcpflags] & tcp-push == tcp-push) and
+(dst port 80 or dst port 443)
+.Ed
+.Pp
+This targets TCP segments with the PSH flag set going to port 80 (HTTP)
+or 443 (HTTPS/TLS) on both IPv4 and IPv6.
+.Pp
+The PSH flag restriction is intentional.
+.Nm
+does not perform TCP stream reassembly; a TLS ClientHello fragmented across
+multiple segments cannot be parsed regardless of which segments are admitted.
+Filtering to PSH-flagged segments (which almost always mark a complete
+application-layer write) reduces noise without missing anything the tool
+could successfully parse.
+.Pp
+Override with
+.Fl f
+when capturing on non-standard ports or when UDP is required.
+.Sh BINARIES
+Two binaries are built:
+.Bl -tag -width snidump_noether
+.It Nm snidump
+Standard build.
+Expects Ethernet frames
+.Pq Dv DLT_EN10MB .
+Handles both IPv4 and IPv6.
+.It Nm snidump_noether
+Built with
+.Dv __NO_ETHERNET__
+defined.
+Skips the Ethernet header.
+Use on tunnel or raw-IP interfaces
+.Pq e.g.\& Sy tun0 , gif0 .
+Detects IPv4 vs IPv6 from the version nibble of each raw IP frame.
+.El
+.Pp
+.Nm
+checks the datalink type reported by libpcap at startup and exits with a
+fatal error if it does not match the compiled-in expectation, preventing
+silent misparse on interfaces with unexpected link-layer framing.
+.Sh EXAMPLES
+Live capture on
+.Pa eth0 :
+.Bd -literal -offset indent
+sudo snidump -i eth0
+.Ed
+.Pp
+Promiscuous capture with JSON output and no informational messages:
+.Bd -literal -offset indent
+sudo snidump -pqj -i eth0
+.Ed
+.Pp
+Read from a PCAP file, extract sorted unique hostnames:
+.Bd -literal -offset indent
+snidump -r capture.pcap | awk '{print $NF}' | cut -d: -f2- | sort -u
+.Ed
+.Pp
+Read from a PCAP file with JSON, extract unique hostnames using
+.Xr jq 1 :
+.Bd -literal -offset indent
+snidump -qjr capture.pcap | jq -r .host | sort -u
+.Ed
+.Pp
+Capture TLS on a non-standard port:
+.Bd -literal -offset indent
+sudo snidump -i eth0 \e
+  -f '(ip or ip6) and tcp and \e
+      (tcp[tcpflags] & tcp-push == tcp-push) and dst port 8443'
+.Ed
+.Pp
+Tunnel interface (no Ethernet header):
+.Bd -literal -offset indent
+sudo snidump_noether -i tun0
+.Ed
+.Sh FILES
+.Bl -tag -width contrib/snidump.logrotate
+.It Pa contrib/snidump.service
+Sample systemd unit file.
+Runs
+.Nm
+as an unprivileged user with only
+.Sy CAP_NET_RAW .
+.It Pa contrib/snidump.logrotate
+Sample logrotate configuration for
+.Pa /var/log/snidump/hosts.jsonl .
+.It Pa contrib/snidump.rc
+Sample FreeBSD rc.d script using
+.Xr daemon 8
+for daemonization and automatic restart.
+.El
+.Sh DIAGNOSTICS
+.Nm
+exits\ 0 on success (including clean shutdown via
+.Dv SIGINT
+or
+.Dv SIGTERM )
+and non-zero on fatal error.
+Fatal errors are reported to stderr with a
+.Sq [FATAL]
+prefix.
+Non-fatal warnings carry a
+.Sq [WARNING]
+prefix and do not cause
+.Nm
+to exit.
+.Sh LIMITATIONS
+.Bl -bullet
+.It
+.Sy "No TCP stream reassembly."
+Each packet payload is parsed independently.
+A TLS ClientHello spread across multiple TCP segments will not be matched.
+In practice this is rare on standard-MTU links.
+.It
+.Sy IPv4 only for IP-level operations.
+The transport parsers (TLS, HTTP) are protocol-agnostic, but IPv6 extension
+header types
+.Dv ESP
+(encrypted) and unrecognised next-header values cause the packet to be
+silently skipped.
+.It
+.Sy QUIC / HTTP3 not supported.
+QUIC encapsulates the TLS ClientHello inside its own framing and requires
+decryption of the Initial packet (using a publicly known derived key) before
+the SNI is accessible.
+.It
+.Sy HTTP/1.0 and HTTP/1.1 only.
+HTTP/2 hostnames are captured via the TLS SNI mechanism.
+HTTP/3 is not supported (see QUIC above).
+.El
+.Sh SEE ALSO
+.Xr pcap 3 ,
+.Xr pcap-filter 7 ,
+.Xr tcpdump 8 ,
+.Xr jq 1
+.Sh AUTHORS
+.An George Kontaxis

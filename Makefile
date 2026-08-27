@@ -5,6 +5,7 @@ PREFIX  ?= /usr/local
 DESTDIR ?=
 
 BINDIR  = $(DESTDIR)$(PREFIX)/bin
+MANDIR  = $(DESTDIR)$(PREFIX)/share/man
 DOCDIR  = $(DESTDIR)$(PREFIX)/share/doc/snidump
 CONTRIB_SYSTEMD = $(DESTDIR)/etc/systemd/system
 CONTRIB_LOGROTATE = $(DESTDIR)/etc/logrotate.d
@@ -53,6 +54,8 @@ install: all
 	$(INSTALL_DIR) $(BINDIR)
 	$(INSTALL_PROGRAM) bin/snidump         $(BINDIR)/snidump
 	$(INSTALL_PROGRAM) bin/snidump_noether $(BINDIR)/snidump_noether
+	$(INSTALL_DIR) $(MANDIR)/man8
+	$(INSTALL_DATA) man/man8/snidump.8 $(MANDIR)/man8/snidump.8
 	$(INSTALL_DIR) $(DOCDIR)
 	$(INSTALL_DATA) README.md USAGE.md HACKING.md TODO.md $(DOCDIR)/
 	@echo ""
@@ -66,6 +69,7 @@ install: all
 
 uninstall:
 	rm -f  $(BINDIR)/snidump $(BINDIR)/snidump_noether
+	rm -f  $(MANDIR)/man8/snidump.8
 	rm -rf $(DOCDIR)
 
 clean:
