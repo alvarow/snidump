@@ -1,6 +1,7 @@
 /* kontaxis 2015-10-31 */
 
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #include <arpa/inet.h>
@@ -10,15 +11,246 @@
 #include "tls.h"
 #include "ciphersuites.h"
 
-#include "aux.h"
-
 #include "tls_api.h"
 
 #include "colors.h"
 
-void *tls_in;
+/* -------------------------------------------------------------------------
+ * read_bytes — bounded cursor over a flat buffer
+ * ------------------------------------------------------------------------- */
 
-int (*callback_handshake_clienthello_servername)(uint8_t *, uint16_t);
+struct read_bytes_ctx {
+	void  *in;
+	size_t read_bytes_available;
+};
+
+/*
+ * Copies exactly must_read_bytes from ctx->in into out, or fails.
+ * Passing NULL for out skips the copy but still advances the cursor.
+ *
+ * Returns must_read_bytes on success, -1 on failure (not enough data or
+ * null ctx).  A must_read_bytes of 0 always succeeds and returns 0.
+ */
+static int read_bytes(struct read_bytes_ctx *ctx, void *out,
+	size_t must_read_bytes)
+{
+	if (!ctx) {
+		return -1;
+	}
+
+	if (must_read_bytes == 0) {
+		return 0;
+	}
+
+	if (ctx->read_bytes_available < must_read_bytes) {
+		return -1;
+	}
+
+	if (~((size_t)0x0) - (size_t)ctx->in < must_read_bytes) {
+		return -1;
+	}
+
+	if (out != NULL) {
+		memcpy(out, ctx->in, must_read_bytes);
+	}
+	ctx->in = ((uint8_t *)ctx->in) + must_read_bytes;
+	ctx->read_bytes_available -= must_read_bytes;
+
+	return (int)must_read_bytes;
+}
+
+/* -------------------------------------------------------------------------
+ * TLS wire-format structs (private to this TU)
+ * -------------------------------------------------------------------------
+ * These are file-scope variables used as scratch space while parsing a
+ * single packet.  The tool is single-threaded so this is safe.
+ * -------------------------------------------------------------------------
+ */
+
+static struct __attribute__((__packed__))
+{
+	uint8_t  TLSPlaintext__type;
+	uint8_t  TLSPlaintext__versionMajor;
+	uint8_t  TLSPlaintext__versionMinor;
+	uint16_t TLSPlaintext__length;
+} tls_TLSPlaintext_header =
+{
+	.TLSPlaintext__versionMajor = PROTOCOLMAJOR,
+	.TLSPlaintext__versionMinor = PROTOCOLMINOR
+};
+
+static struct __attribute__((__packed__))
+{
+	uint8_t type;
+} tls_ChangeCipherSpec;
+
+static struct __attribute__((__packed__))
+{
+	uint8_t Alert__level;
+	uint8_t Alert__description;
+} tls_Alert;
+
+static struct __attribute__((__packed__))
+{
+	uint8_t  Handshake__type;
+	uint8_t  Handshake__length[3];
+} tls_Handshake_header;
+
+static struct __attribute__((__packed__))
+{
+	uint8_t  client_version_major;
+	uint8_t  client_version_minor;
+	uint32_t random_gmt_unix_time;
+	uint8_t  random_random_bytes[28];
+} tls_ClientHello_intro =
+{
+	.client_version_major = PROTOCOLMAJOR,
+	.client_version_minor = PROTOCOLMINOR
+};
+
+static struct __attribute__((__packed__))
+{
+	uint8_t session_id_length;
+	uint8_t session_id[32];
+} tls_ClientHello_session =
+{
+	.session_id_length = 0
+};
+
+static struct __attribute__((__packed__))
+{
+	uint16_t cipher_suites_length;
+	uint16_t cipher_suites[(0xFFFF - 1)/sizeof(uint16_t)];
+} tls_ClientHello_ciphersuites =
+{
+	.cipher_suites_length = 0x0200,
+	.cipher_suites[0] = h16ton16(CIPHERSUITEMANDATORY)
+};
+
+static struct __attribute__((__packed__))
+{
+	uint8_t compression_methods_length;
+	uint8_t compression_methods[0xFF];
+} tls_ClientHello_compression =
+{
+	.compression_methods_length = 0x1,
+	.compression_methods[0] = 0x0
+};
+
+static struct __attribute__((__packed__))
+{
+	uint16_t extensions_length;
+	uint8_t  extensions[0xFFFF];
+} tls_extensions;
+
+static struct __attribute__((__packed__))
+{
+	uint16_t extension_type;
+	uint16_t extension_data_length;
+	uint8_t  extension_data[0xFFFF];
+} tls_Extension;
+
+static struct __attribute__((__packed__))
+{
+	uint8_t  name_type;
+	uint16_t host_name_length;
+	uint8_t  host_name[0xFFFF];
+} tls_ServerName;
+
+static struct __attribute__((__packed__))
+{
+	uint16_t server_name_list_length;
+	uint8_t  server_name_list[0xFFFF];
+} tls_ServerNameList;
+
+/* -------------------------------------------------------------------------
+ * Debug-only helpers (string tables and type-to-string functions)
+ * -------------------------------------------------------------------------
+ */
+
+#if __DEBUG__
+
+static const char *tls_ExtensionNames[TLS_EXTENSIONS_MAX + 1] = {
+	"server_name", /* 0 */
+};
+
+#define TLS_EXTENSION_TXT(n) \
+  (((n) >= 0 && (n) <= TLS_EXTENSIONS_MAX) ? tls_ExtensionNames[(n)] \
+    : "UNKNOWN")
+
+
+static const char *tls_ContentType(uint8_t n)
+{
+	switch (n) {
+		case SSL3_RT_CHANGE_CIPHER_SPEC: return "change_cipher_spec";
+		case SSL3_RT_ALERT:              return "alert";
+		case SSL3_RT_HANDSHAKE:          return "handshake";
+		case SSL3_RT_APPLICATION_DATA:   return "application_data";
+		default:                         return "UNKNOWN";
+	}
+}
+
+static const char *tls_AlertLevel(uint8_t n)
+{
+	switch (n) {
+		case SSL3_AL_WARNING: return "warning";
+		case SSL3_AL_FATAL:   return "fatal";
+		default:              return "UNKNOWN";
+	}
+}
+
+static const char *tls_AlertDescription(uint8_t n)
+{
+	switch (n) {
+		case SSL3_AD_CLOSE_NOTIFY:        return "close_notify";
+		case SSL3_AD_UNEXPECTED_MESSAGE:  return "unexpected_message";
+		case SSL3_AD_BAD_RECORD_MAC:      return "bad_record_mac";
+		case 21: return "decryption_failed_RESERVED";
+		case 22: return "record_overflow";
+		case 30: return "decompression_failure";
+		case 40: return "handshake_failure";
+		case 41: return "no_certificate_RESERVED";
+		case 42: return "bad_certificate";
+		case 43: return "unsupported_certificate";
+		case 44: return "certificate_revoked";
+		case 45: return "certificate_expired";
+		case 46: return "certificate_unknown";
+		case 47: return "illegal_parameter";
+		case 48: return "unknown_ca";
+		case 49: return "access_denied";
+		case 50: return "decode_error";
+		case 51: return "decrypt_error";
+		default: return "UNKNOWN";
+	}
+}
+
+static const char *tls_HandshakeType(uint8_t n)
+{
+	switch (n) {
+		case SSL3_MT_HELLO_REQUEST:       return "hello_request";
+		case SSL3_MT_CLIENT_HELLO:        return "client_hello";
+		case SSL3_MT_SERVER_HELLO:        return "server_hello";
+		case SSL3_MT_CERTIFICATE:         return "certificate";
+		case SSL3_MT_SERVER_KEY_EXCHANGE: return "server_key_exchange";
+		case SSL3_MT_CERTIFICATE_REQUEST: return "certificate_request";
+		case SSL3_MT_SERVER_DONE:         return "server_hello_done";
+		case SSL3_MT_CERTIFICATE_VERIFY:  return "certificate_verify";
+		case SSL3_MT_CLIENT_KEY_EXCHANGE: return "client_key_exchange";
+		case SSL3_MT_FINISHED:            return "finished";
+		default:                          return "UNKNOWN";
+	}
+}
+
+#endif /* __DEBUG__ */
+
+/* -------------------------------------------------------------------------
+ * TLS processing
+ * -------------------------------------------------------------------------
+ */
+
+static void *tls_in;
+
+static int (*callback_handshake_clienthello_servername)(uint8_t *, uint16_t);
 
 int tls_set_callback_handshake_clienthello_servername(
 	int (*handler)(uint8_t *, uint16_t))
@@ -27,7 +259,7 @@ int tls_set_callback_handshake_clienthello_servername(
 	return 0;
 }
 
-int tls_process_Handshake_ClientHello_Extensions_ServerName()
+static int tls_process_Handshake_ClientHello_Extensions_ServerName()
 {
 	size_t must_read_bytes;
 	size_t must_read_name_list_bytes;
@@ -37,8 +269,6 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 #endif
 
 	must_read_bytes = n16toh16(tls_Extension.extension_data_length);
-
-	/* server_name_list_length */
 
 	if (must_read_bytes <
 		sizeof(tls_ServerNameList.server_name_list_length)) {
@@ -50,15 +280,14 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 	}
 
 	if (read_bytes(tls_in, &tls_ServerNameList.server_name_list_length,
-		sizeof(tls_ServerNameList.server_name_list_length)) <= 0) {
+		sizeof(tls_ServerNameList.server_name_list_length)) < 0) {
 #if __DEBUG__
 		fprintf(stderr,
 			"Not enough bytes for tls_ServerNameList.server_name_list_length.\n");
 #endif
 		return 0;
 	}
-	must_read_bytes -=
-		sizeof(tls_ServerNameList.server_name_list_length);
+	must_read_bytes -= sizeof(tls_ServerNameList.server_name_list_length);
 
 #if __DEBUG__
 	fprintf(stderr,
@@ -66,8 +295,7 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		n16toh16(tls_ServerNameList.server_name_list_length));
 #endif
 
-	if (must_read_bytes <
-		n16toh16(tls_ServerNameList.server_name_list_length)) {
+	if (must_read_bytes < n16toh16(tls_ServerNameList.server_name_list_length)) {
 #if __DEBUG__
 		fprintf(stderr,
 			"tls_ServerNameList.server_name_list_length is not expected.\n");
@@ -75,13 +303,10 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		return 0;
 	}
 
-	must_read_name_list_bytes = n16toh16(
-		tls_ServerNameList.server_name_list_length);
+	must_read_name_list_bytes =
+		n16toh16(tls_ServerNameList.server_name_list_length);
 
 	while (must_read_name_list_bytes > 0) {
-		/* ServerName */
-
-		/* name type */
 		if (must_read_name_list_bytes < sizeof(tls_ServerName.name_type)) {
 #if __DEBUG__
 			fprintf(stderr, "Size of tls_ServerName.name_type is not expected.\n");
@@ -90,7 +315,7 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		}
 
 		if (read_bytes(tls_in, &tls_ServerName.name_type,
-			sizeof(tls_ServerName.name_type)) <= 0) {
+			sizeof(tls_ServerName.name_type)) < 0) {
 #if __DEBUG__
 			fprintf(stderr, "Not enough bytes for tls_ServerName.name_type.\n");
 #endif
@@ -99,11 +324,11 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		must_read_name_list_bytes -= sizeof(tls_ServerName.name_type);
 
 #if __DEBUG__
-	fprintf(stderr,
-		"TLS ClientHello Extension SNI Type: (%u)\n", tls_ServerName.name_type);
+		fprintf(stderr,
+			"TLS ClientHello Extension SNI Type: (%u)\n",
+			tls_ServerName.name_type);
 #endif
 
-		/* name length */
 		if (must_read_name_list_bytes < sizeof(tls_ServerName.host_name_length)) {
 #if __DEBUG__
 			fprintf(stderr,
@@ -113,7 +338,7 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		}
 
 		if (read_bytes(tls_in, &tls_ServerName.host_name_length,
-			sizeof(tls_ServerName.host_name_length)) <= 0) {
+			sizeof(tls_ServerName.host_name_length)) < 0) {
 #if __DEBUG__
 			fprintf(stderr,
 				"Not enough bytes for tls_ServerName.host_name_length.\n");
@@ -123,22 +348,22 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		must_read_name_list_bytes -= sizeof(tls_ServerName.host_name_length);
 
 #if __DEBUG__
-	fprintf(stderr,
-		"TLS ClientHello Extension SNI length: %u\n",
-		n16toh16(tls_ServerName.host_name_length));
+		fprintf(stderr,
+			"TLS ClientHello Extension SNI length: %u\n",
+			n16toh16(tls_ServerName.host_name_length));
 #endif
 
-		/* name */
 		if (must_read_name_list_bytes <
 			n16toh16(tls_ServerName.host_name_length)) {
 #if __DEBUG__
-			fprintf(stderr, "tls_ServerName.host_name_length is not expected.\n");
+			fprintf(stderr,
+				"tls_ServerName.host_name_length is not expected.\n");
 #endif
 			return 0;
 		}
 
 		if (read_bytes(tls_in, &tls_ServerName.host_name,
-			n16toh16(tls_ServerName.host_name_length)) <= 0) {
+			n16toh16(tls_ServerName.host_name_length)) < 0) {
 #if __DEBUG__
 			fprintf(stderr, "Not enough bytes for tls_ServerName.host_name.\n");
 #endif
@@ -153,34 +378,30 @@ int tls_process_Handshake_ClientHello_Extensions_ServerName()
 		}
 		fprintf(stderr, " (0x");
 		for (i = 0; i < n16toh16(tls_ServerName.host_name_length); i++) {
-			fprintf(stderr, "%02x", (uint8_t) tls_ServerName.host_name[i]);
+			fprintf(stderr, "%02x", (uint8_t)tls_ServerName.host_name[i]);
 		}
 		fprintf(stderr, ")\n");
 #endif
 
 		if (callback_handshake_clienthello_servername != NULL) {
-			callback_handshake_clienthello_servername(tls_ServerName.host_name,
+			callback_handshake_clienthello_servername(
+				tls_ServerName.host_name,
 				n16toh16(tls_ServerName.host_name_length));
 		}
-	} // must_read_name_list_bytes > 0
+	}
 	must_read_bytes -= n16toh16(tls_ServerNameList.server_name_list_length);
 
 	return n16toh16(tls_Extension.extension_data_length) - must_read_bytes;
 }
 
-int tls_process_Handshake_ClientHello_Extensions()
+static int tls_process_Handshake_ClientHello_Extensions()
 {
 	size_t must_read_bytes;
-
 	unsigned int r;
-
-	/* Now we know we must read extensions_length bytes */
 
 	must_read_bytes = n16toh16(tls_extensions.extensions_length);
 
 	while (must_read_bytes > 0) {
-		/* extension_type */
-
 		if (must_read_bytes < sizeof(tls_Extension.extension_type)) {
 #if __DEBUG__
 			fprintf(stderr,
@@ -190,9 +411,10 @@ int tls_process_Handshake_ClientHello_Extensions()
 		}
 
 		if (read_bytes(tls_in, &tls_Extension.extension_type,
-			sizeof(tls_Extension.extension_type)) <= 0) {
+			sizeof(tls_Extension.extension_type)) < 0) {
 #if __DEBUG__
-			fprintf(stderr, "Not enough bytes for tls_Extension.extension_type.\n");
+			fprintf(stderr,
+				"Not enough bytes for tls_Extension.extension_type.\n");
 #endif
 			return 0;
 		}
@@ -204,10 +426,7 @@ int tls_process_Handshake_ClientHello_Extensions()
 			n16toh16(tls_Extension.extension_type));
 #endif
 
-		/* extension_length */
-
-		if (must_read_bytes <
-			sizeof(tls_Extension.extension_data_length)) {
+		if (must_read_bytes < sizeof(tls_Extension.extension_data_length)) {
 #if __DEBUG__
 			fprintf(stderr,
 				"Size of tls_Extension.extension_data_length is not expected.\n");
@@ -216,7 +435,7 @@ int tls_process_Handshake_ClientHello_Extensions()
 		}
 
 		if (read_bytes(tls_in, &tls_Extension.extension_data_length,
-			sizeof(tls_Extension.extension_data_length)) <= 0) {
+			sizeof(tls_Extension.extension_data_length)) < 0) {
 #if __DEBUG__
 			fprintf(stderr,
 				"Not enough bytes for tls_Extension.extension_data_length.\n");
@@ -238,67 +457,50 @@ int tls_process_Handshake_ClientHello_Extensions()
 			return 0;
 		}
 
-		/* extension */
-
-		switch(n16toh16(tls_Extension.extension_type)) {
+		switch (n16toh16(tls_Extension.extension_type)) {
 			case TLS_EXTENSION_TYPE_SERVER_NAME:
-				if ((r =
-					tls_process_Handshake_ClientHello_Extensions_ServerName()) == 0) {
+				if ((r = tls_process_Handshake_ClientHello_Extensions_ServerName())
+					== 0) {
 					return r;
 				}
-
 				must_read_bytes -= r;
 				break;
 
 			default:
 				if (read_bytes(tls_in, NULL,
-					n16toh16(tls_Extension.extension_data_length)) <= 0 &&
-					n16toh16(tls_Extension.extension_data_length) != 0) {
+					n16toh16(tls_Extension.extension_data_length)) < 0) {
 #if __DEBUG__
 					fprintf(stderr, "Not enough bytes to match "
 						"tls_Extension.extension_data_length.\n");
 #endif
 					return 0;
 				}
-
-				must_read_bytes -=
-					n16toh16(tls_Extension.extension_data_length);
+				must_read_bytes -= n16toh16(tls_Extension.extension_data_length);
 				break;
-		} // tls_Extension.extension_type
-	} // must_read_bytes > 0
+		}
+	}
 
 	return n16toh16(tls_extensions.extensions_length);
 }
 
 /*
- * process a TLS Handshake ClientHello message
+ * Processes a TLS Handshake ClientHello message.
+ * Returns number of bytes consumed, or 0 on parse error.
  */
-int tls_process_Handshake_ClientHello()
+static int tls_process_Handshake_ClientHello()
 {
 #if __DEBUG__
 	unsigned int i;
-#endif
-
-	unsigned int r;
-
-	size_t must_read_bytes;
-
-#if __DEBUG__
 	time_t t;
 	struct tm *ts;
 	char time_buf[80];
 #endif
 
-	/* Exactly must_read_bytes bytes should follow in this ClientHello. */
+	unsigned int r;
+	size_t must_read_bytes;
+
 	must_read_bytes = n24toh32(tls_Handshake_header.Handshake__length);
 
-	/* client_version_major */
-	/* client_version_minor */
-	/* random_gmt_unix_time */
-	/* random_random_bytes  */
-
-	/* Read up to the session ID length byte. Since the session ID
-	 * is of variable length we need to figure out how much to read as such. */
 	if (must_read_bytes < sizeof(tls_ClientHello_intro)) {
 #if __DEBUG__
 		fprintf(stderr, "Size of tls_ClientHello_intro is not expected.\n");
@@ -307,7 +509,7 @@ int tls_process_Handshake_ClientHello()
 	}
 
 	if (read_bytes(tls_in, &tls_ClientHello_intro,
-		sizeof(tls_ClientHello_intro)) <= 0) {
+		sizeof(tls_ClientHello_intro)) < 0) {
 #if __DEBUG__
 		fprintf(stderr, "Not enough bytes for ClientHello_intro.\n");
 #endif
@@ -334,8 +536,6 @@ int tls_process_Handshake_ClientHello()
 	fprintf(stderr, "\n");
 #endif
 
-	/* session_id_length */
-
 	if (must_read_bytes < sizeof(tls_ClientHello_session.session_id_length)) {
 #if __DEBUG__
 		fprintf(stderr,
@@ -345,10 +545,10 @@ int tls_process_Handshake_ClientHello()
 	}
 
 	if (read_bytes(tls_in, &tls_ClientHello_session.session_id_length,
-		sizeof(tls_ClientHello_session.session_id_length)) <= 0) {
+		sizeof(tls_ClientHello_session.session_id_length)) < 0) {
 #if __DEBUG__
-			fprintf(stderr,
-				"Not enough bytes for tls_ClientHello_session.session_id_length.\n");
+		fprintf(stderr,
+			"Not enough bytes for tls_ClientHello_session.session_id_length.\n");
 #endif
 		return 0;
 	}
@@ -367,10 +567,6 @@ int tls_process_Handshake_ClientHello()
 		return 0;
 	}
 
-	/* session_id */
-
-	/* Now we know we must read session_id_length bytes */
-
 	if (tls_ClientHello_session.session_id_length) {
 		if (tls_ClientHello_session.session_id_length >
 			sizeof(tls_ClientHello_session.session_id)) {
@@ -382,7 +578,7 @@ int tls_process_Handshake_ClientHello()
 		}
 
 		if (read_bytes(tls_in, tls_ClientHello_session.session_id,
-			tls_ClientHello_session.session_id_length) <= 0) {
+			tls_ClientHello_session.session_id_length) < 0) {
 #if __DEBUG__
 			fprintf(stderr,
 				"Not enough bytes to match tls_ClientHello_session.session_id.\n");
@@ -394,30 +590,25 @@ int tls_process_Handshake_ClientHello()
 
 #if __DEBUG__
 	for (i = 0; i < tls_ClientHello_session.session_id_length; i++) {
-		if (i == 0) {
-			fprintf(stderr, "TLS ClientHello Session ID: ");
-		}
+		if (i == 0) fprintf(stderr, "TLS ClientHello Session ID: ");
 		fprintf(stderr, "%02x", tls_ClientHello_session.session_id[i]);
-		if (i + 1 == tls_ClientHello_session.session_id_length) {
+		if (i + 1 == tls_ClientHello_session.session_id_length)
 			fprintf(stderr, "\n");
-		}
 	}
 #endif
-
-	/* cipher_suites_length */
 
 	if (must_read_bytes <
 		sizeof(tls_ClientHello_ciphersuites.cipher_suites_length)) {
 #if __DEBUG__
-		fprintf(stderr,
-			"Size of tls_ClientHello_ciphersuites.cipher_suites_length "
+		fprintf(stderr, "Size of tls_ClientHello_ciphersuites.cipher_suites_length "
 			"is not expected.\n");
 #endif
 		return 0;
 	}
 
-	if (read_bytes(tls_in, &tls_ClientHello_ciphersuites.cipher_suites_length,
-		sizeof(tls_ClientHello_ciphersuites.cipher_suites_length)) <= 0) {
+	if (read_bytes(tls_in,
+		&tls_ClientHello_ciphersuites.cipher_suites_length,
+		sizeof(tls_ClientHello_ciphersuites.cipher_suites_length)) < 0) {
 #if __DEBUG__
 		fprintf(stderr, "Not enough bytes to match "
 			"tls_ClientHello_ciphersuites.cipher_suites_length.\n");
@@ -440,8 +631,6 @@ int tls_process_Handshake_ClientHello()
 		return 0;
 	}
 
-	/* cipher_suites */
-
 	if (n16toh16(tls_ClientHello_ciphersuites.cipher_suites_length) >
 		sizeof(tls_ClientHello_ciphersuites.cipher_suites)) {
 #if __DEBUG__
@@ -452,18 +641,17 @@ int tls_process_Handshake_ClientHello()
 	}
 
 	if (read_bytes(tls_in, tls_ClientHello_ciphersuites.cipher_suites,
-		n16toh16(tls_ClientHello_ciphersuites.cipher_suites_length)) <= 0) {
+		n16toh16(tls_ClientHello_ciphersuites.cipher_suites_length)) < 0) {
 #if __DEBUG__
 		fprintf(stderr,
 			"Not enough bytes for tls_ClientHello_ciphersuites.cipher_suites.\n");
 #endif
 		return 0;
 	}
-	must_read_bytes -= n16toh16(
-		tls_ClientHello_ciphersuites.cipher_suites_length);
+	must_read_bytes -=
+		n16toh16(tls_ClientHello_ciphersuites.cipher_suites_length);
 
 #if __DEBUG__
-	/* length is in bytes */
 	for (i = 0;
 		i < n16toh16(tls_ClientHello_ciphersuites.cipher_suites_length) /
 			sizeof(CipherSuite); i++) {
@@ -473,13 +661,10 @@ int tls_process_Handshake_ClientHello()
 	}
 #endif
 
-	/* compression_methods_length */
-
 	if (must_read_bytes <
 		sizeof(tls_ClientHello_compression.compression_methods_length)) {
 #if __DEBUG__
-		fprintf(stderr,
-			"Size of tls_ClientHello_compression.compression_methods_length "
+		fprintf(stderr, "Size of tls_ClientHello_compression.compression_methods_length "
 			"is not expected.\n");
 #endif
 		return 0;
@@ -487,7 +672,7 @@ int tls_process_Handshake_ClientHello()
 
 	if (read_bytes(tls_in,
 		&tls_ClientHello_compression.compression_methods_length,
-		sizeof(tls_ClientHello_compression.compression_methods_length)) <= 0) {
+		sizeof(tls_ClientHello_compression.compression_methods_length)) < 0) {
 #if __DEBUG__
 		fprintf(stderr, "Not enough bytes for "
 			"tls_ClientHello_compression.compression_methods_length.\n");
@@ -511,8 +696,6 @@ int tls_process_Handshake_ClientHello()
 		return 0;
 	}
 
-	/* compression_methods */
-
 	if (tls_ClientHello_compression.compression_methods_length >
 		sizeof(tls_ClientHello_compression.compression_methods)) {
 #if __DEBUG__
@@ -523,7 +706,7 @@ int tls_process_Handshake_ClientHello()
 	}
 
 	if (read_bytes(tls_in, tls_ClientHello_compression.compression_methods,
-		tls_ClientHello_compression.compression_methods_length) <= 0) {
+		tls_ClientHello_compression.compression_methods_length) < 0) {
 #if __DEBUG__
 		fprintf(stderr, "Not enough bytes for "
 			"tls_ClientHello_compression.compression_methods.\n");
@@ -533,15 +716,12 @@ int tls_process_Handshake_ClientHello()
 	must_read_bytes -= tls_ClientHello_compression.compression_methods_length;
 
 #if __DEBUG__
-	for (i = 0; i < tls_ClientHello_compression.compression_methods_length;
-		i++) {
-		fprintf(stderr, "TLS ClientHello Compression Method: %s (%u)\n",
-			COMPRESSION_TXT(tls_ClientHello_compression.compression_methods[i]),
+	for (i = 0;
+		i < tls_ClientHello_compression.compression_methods_length; i++) {
+		fprintf(stderr, "TLS ClientHello Compression Method: %u\n",
 			tls_ClientHello_compression.compression_methods[i]);
 	}
 #endif
-
-	/* tls_extensions */
 
 	if (must_read_bytes > 0) {
 		if (must_read_bytes < sizeof(tls_extensions.extensions_length)) {
@@ -553,7 +733,7 @@ int tls_process_Handshake_ClientHello()
 		}
 
 		if (read_bytes(tls_in, &tls_extensions.extensions_length,
-			sizeof(tls_extensions.extensions_length)) <= 0) {
+			sizeof(tls_extensions.extensions_length)) < 0) {
 #if __DEBUG__
 			fprintf(stderr,
 				"Not enough bytes for tls_extensions.extensions_length.\n");
@@ -575,24 +755,23 @@ int tls_process_Handshake_ClientHello()
 			return 0;
 		}
 
-		if ((r = tls_process_Handshake_ClientHello_Extensions()) == 0) {return r;}
+		if ((r = tls_process_Handshake_ClientHello_Extensions()) == 0) {
+			return r;
+		}
 		must_read_bytes -= r;
-	} // must_read_bytes > 0
+	}
 
 	return n24toh32(tls_Handshake_header.Handshake__length) - must_read_bytes;
 }
 
 /*
- * Processes an SSL/TLS Handshake.
+ * Processes the given payload as a TLS record.
  *
  * Returns number of bytes processed.
- * - Zero indicates some parsing error. (Payload is not a TLS record)
- * - More than zero but less than payload_length indicates than a TLS
- * record has been found with good confidence but there are trailing
- * bytes that we cannot make sense of.
- * - Exactly payload_length indicates with high confidence succesful parsing
- * of the entire payload as a TLS record.
- *
+ * - Zero indicates some parsing error (payload is not a TLS record).
+ * - More than zero but less than payload_length indicates a TLS record was
+ *   found with good confidence but trailing bytes could not be parsed.
+ * - Exactly payload_length indicates successful parsing of the full payload.
  */
 uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 {
@@ -605,15 +784,13 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 
 	read_bytes_checkpoint = 0;
 
-	/* Read context. */
 	ctx.in = payload;
 	ctx.read_bytes_available = payload_length;
 	tls_in = &ctx;
 
 	while (ctx.read_bytes_available > 0) {
-		/* read SSL/TLS record header */
 		if (read_bytes(tls_in, &tls_TLSPlaintext_header,
-			sizeof(tls_TLSPlaintext_header)) <= 0) {
+			sizeof(tls_TLSPlaintext_header)) < 0) {
 #if __DEBUG__
 			fprintf(stderr, "Not enough bytes for tls_TLSPlaintext_header.\n");
 #endif
@@ -630,18 +807,15 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 			n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length));
 #endif
 
-		/* The record layer fragments information blocks (e.g., handshake
-		 * messages or application data) into tls_TLSPlaintext records carrying
-		 * data in chunks of 2^14 bytes or less.*/
 		if (n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length) > 0x4000) {
 #if __DEBUG__
-				fprintf(stderr, "TLSPlaintext__length > 0x4000.\n");
+			fprintf(stderr, "TLSPlaintext__length > 0x4000.\n");
 #endif
 			return read_bytes_checkpoint;
 		}
 
-		/* Exactly must_read_bytes bytes should follow in this TLS record. */
-		must_read_bytes = n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length);
+		must_read_bytes =
+			n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length);
 
 		if (ctx.read_bytes_available < must_read_bytes) {
 #if __DEBUG__
@@ -650,47 +824,49 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 			return read_bytes_checkpoint;
 		}
 
-		/* process SSL/TLS record */
-		switch(tls_TLSPlaintext_header.TLSPlaintext__type) {
-			/* change_cipher_spec (20) */
+		switch (tls_TLSPlaintext_header.TLSPlaintext__type) {
+
 			case SSL3_RT_CHANGE_CIPHER_SPEC:
 				while (must_read_bytes > 0) {
 					if (must_read_bytes < sizeof(tls_ChangeCipherSpec)) {
 #if __DEBUG__
-						fprintf(stderr, "Size of tls_ChangeCipherSpec is not expected.\n");
+						fprintf(stderr,
+							"Size of tls_ChangeCipherSpec is not expected.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
 
 					if (read_bytes(tls_in, &tls_ChangeCipherSpec,
-						sizeof(tls_ChangeCipherSpec)) <= 0) {
+						sizeof(tls_ChangeCipherSpec)) < 0) {
 #if __DEBUG__
-						fprintf(stderr, "Not enough bytes for tls_ChangeCipherSpec.\n");
+						fprintf(stderr,
+							"Not enough bytes for tls_ChangeCipherSpec.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
 					must_read_bytes -= sizeof(tls_ChangeCipherSpec);
 
-#if __debug__
+#if __DEBUG__
 					CPRINT_STDERR(C_CYAN_LIGHT, "[.] TLS tls_ChangeCipherSpec\n");
 #endif
-				} // must_read_bytes > 0
+				}
 
-				read_bytes_checkpoint = payload_length - ctx.read_bytes_available;
+				read_bytes_checkpoint =
+					payload_length - ctx.read_bytes_available;
 				break;
 
-			/* alert (21) */
 			case SSL3_RT_ALERT:
 				while (must_read_bytes > 0) {
 					if (must_read_bytes < sizeof(tls_Alert)) {
 #if __DEBUG__
-						fprintf(stderr, "Size of tls_Alert is not expected.\n");
+						fprintf(stderr,
+							"Size of tls_Alert is not expected.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
 
 					if (read_bytes(tls_in, &tls_Alert,
-						sizeof(tls_Alert)) <= 0) {
+						sizeof(tls_Alert)) < 0) {
 #if __DEBUG__
 						fprintf(stderr, "Not enough bytes for tls_Alert.\n");
 #endif
@@ -707,7 +883,7 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 						tls_AlertDescription(tls_Alert.Alert__description));
 #endif
 
-					switch(tls_Alert.Alert__level) {
+					switch (tls_Alert.Alert__level) {
 						case SSL3_AL_WARNING:
 						case SSL3_AL_FATAL:
 							break;
@@ -718,10 +894,9 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 								tls_Alert.Alert__level);
 #endif
 							return read_bytes_checkpoint;
-							break;
-					} // tls_Alert.Alert__level
+					}
 
-					switch(tls_Alert.Alert__description) {
+					switch (tls_Alert.Alert__description) {
 						case SSL3_AD_CLOSE_NOTIFY:
 						case SSL3_AD_UNEXPECTED_MESSAGE:
 						case SSL3_AD_BAD_RECORD_MAC:
@@ -733,28 +908,28 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 								tls_Alert.Alert__description);
 #endif
 							return read_bytes_checkpoint;
-							break;
-					} // tls_Alert.Alert__description
-				} // must_read_bytes > 0
+					}
+				}
 
-				read_bytes_checkpoint = payload_length - ctx.read_bytes_available;
+				read_bytes_checkpoint =
+					payload_length - ctx.read_bytes_available;
 				break;
 
-			/* handshake (22) */
 			case SSL3_RT_HANDSHAKE:
 				while (must_read_bytes > 0) {
 					if (must_read_bytes < sizeof(tls_Handshake_header)) {
 #if __DEBUG__
-						fprintf(stderr, "Size of tls_Handshake_header is not expected.\n");
+						fprintf(stderr,
+							"Size of tls_Handshake_header is not expected.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
 
-					/* read handshake header */
 					if (read_bytes(tls_in, &tls_Handshake_header,
-						sizeof(tls_Handshake_header)) <= 0) {
+						sizeof(tls_Handshake_header)) < 0) {
 #if __DEBUG__
-						fprintf(stderr, "Not enough bytes for tls_Handshake_header.\n");
+						fprintf(stderr,
+							"Not enough bytes for tls_Handshake_header.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
@@ -762,8 +937,7 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 
 #if __DEBUG__
 					CPRINT_STDERR(C_CYAN_LIGHT,
-						"[.] TLS Handshake "
-						"type:%u(%s) length:%u\n",
+						"[.] TLS Handshake type:%u(%s) length:%u\n",
 						tls_Handshake_header.Handshake__type,
 						tls_HandshakeType(tls_Handshake_header.Handshake__type),
 						n24toh32(tls_Handshake_header.Handshake__length));
@@ -772,59 +946,37 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 					if (must_read_bytes <
 						n24toh32(tls_Handshake_header.Handshake__length)) {
 #if __DEBUG__
-						fprintf(stderr, "Not enough bytes to match Handshake__length.\n");
+						fprintf(stderr,
+							"Not enough bytes to match Handshake__length.\n");
 #endif
 						return read_bytes_checkpoint;
 					}
 
-					/* process Handshake type */
-					switch(tls_Handshake_header.Handshake__type) {
-						/* ClientHello (1) */
+					switch (tls_Handshake_header.Handshake__type) {
 						case SSL3_MT_CLIENT_HELLO:
 							if ((r = tls_process_Handshake_ClientHello()) == 0) {
 								return read_bytes_checkpoint;
 							}
-
 							must_read_bytes -= r;
 							break;
 
-						/* (0) */
 						case SSL3_MT_HELLO_REQUEST:
-							/* Fall through. */
-						/* ServerHello (2) */
 						case SSL3_MT_SERVER_HELLO:
-							/* Fall through. */
-						/* Certificate (11) */
 						case SSL3_MT_CERTIFICATE:
-							/* Fall through. */
-						/* Server Key Exchange (12) */
 						case SSL3_MT_SERVER_KEY_EXCHANGE:
-							/* Fall through. */
-						/* Certificate Request (13) */
 						case SSL3_MT_CERTIFICATE_REQUEST:
-							/* Fall through. */
-						/* ServerHelloDone (14)*/
 						case SSL3_MT_SERVER_DONE:
-							/* Fall through. */
-						/* (15) */
 						case SSL3_MT_CERTIFICATE_VERIFY:
-							/* Fall through. */
-						/* (16) */
 						case SSL3_MT_CLIENT_KEY_EXCHANGE:
-							/* Fall through. */
-						/* (20) */
 						case SSL3_MT_FINISHED:
-							/* consume (and ignore) rest of this record */
 							if (read_bytes(tls_in, NULL,
-									n24toh32(tls_Handshake_header.Handshake__length)) <= 0 &&
-									n24toh32(tls_Handshake_header.Handshake__length) != 0) {
+								n24toh32(tls_Handshake_header.Handshake__length)) < 0) {
 #if __DEBUG__
 								fprintf(stderr,
 									"Not enough bytes to match Handshake__length.\n");
 #endif
 								return read_bytes_checkpoint;
 							}
-
 							must_read_bytes -=
 								n24toh32(tls_Handshake_header.Handshake__length);
 							break;
@@ -833,29 +985,27 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 #if __DEBUG__
 							CPRINT_STDERR(C_RED_LIGHT,
 								"[!] Unknown TLS handshake type:%u\n",
-								(unsigned int) tls_Handshake_header.Handshake__type);
-
+								(unsigned int)tls_Handshake_header.Handshake__type);
 							for (r = 0; r < sizeof(tls_Handshake_header); r++) {
 								fprintf(stderr, "0x%02x ",
 									*(uint8_t *)(((uint8_t *)&tls_Handshake_header) + r));
 							}
 							fprintf(stderr, "\n");
 #endif
-
 							return read_bytes_checkpoint;
-							break;
-					} // tls_Handshake_header.Handshake__type
-				} // must_read_bytes > 0
+					}
+				}
 
-				read_bytes_checkpoint = payload_length - ctx.read_bytes_available;
+				read_bytes_checkpoint =
+					payload_length - ctx.read_bytes_available;
 				break;
 
-			/* application_data (23) */
 			case SSL3_RT_APPLICATION_DATA:
 				if (read_bytes(tls_in, NULL,
-					n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length)) <= 0) {
+					n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length)) < 0) {
 #if __DEBUG__
-					fprintf(stderr, "Not enough bytes to match TLSPlaintext__length.\n");
+					fprintf(stderr,
+						"Not enough bytes to match TLSPlaintext__length.\n");
 #endif
 					return 0;
 				}
@@ -867,28 +1017,26 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 					n16toh16(tls_TLSPlaintext_header.TLSPlaintext__length));
 #endif
 
-				read_bytes_checkpoint = payload_length - ctx.read_bytes_available;
+				read_bytes_checkpoint =
+					payload_length - ctx.read_bytes_available;
 				break;
 
 			default:
 #if __DEBUG__
 				CPRINT_STDERR(C_RED_LIGHT,
 					"[!] Unknown TLS record type:%u\n",
-					(unsigned int) tls_TLSPlaintext_header.TLSPlaintext__type);
-
+					(unsigned int)tls_TLSPlaintext_header.TLSPlaintext__type);
 				for (r = 0; r < sizeof(tls_TLSPlaintext_header); r++) {
 					fprintf(stderr, "0x%02x ",
 						*(uint8_t *)(((uint8_t *)&tls_TLSPlaintext_header) + r));
 				}
 				fprintf(stderr, "\n");
 #endif
-
 				return read_bytes_checkpoint;
-				break;
-		} // tls_TLSPlaintext_header.TLSPlaintext__type
+		}
 
 		assert(must_read_bytes == 0);
-	} // ctx.read_bytes_available > 0
+	}
 
 	return read_bytes_checkpoint;
 }

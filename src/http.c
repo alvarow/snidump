@@ -112,8 +112,11 @@ uint16_t http_process_request(uint8_t *payload, uint16_t payload_length)
 
 	/* Match starts at ovector[0] and ends right before ovector[1].
 	 * We will work on payload beyond the request line. */
+	if ((ovector[1] - ovector[0]) > payload_length) {
+		return 0;
+	}
 	/* Check for address overflow. */
-	if (SIZE_MAX - (size_t) payload < ovector[1] - ovector[0]) {
+	if (SIZE_MAX - (size_t) payload < (size_t)(ovector[1] - ovector[0])) {
 		return 0;
 	}
 	headers = payload + (ovector[1] - ovector[0]);
@@ -184,7 +187,8 @@ int http_init()
 	 * https://tools.ietf.org/rfc/rfc2616.txt
 	 */
 	const char *regex_HTTP_RequestLine =
-		"^(?:OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT) [^ ]+ HTTP/1\\.1\r\n";
+		"^(?:OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PATCH"
+		"|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK) [^ ]+ HTTP/1\\.[01]\r\n";
 
 	pcre_HTTP_RequestLine = pcre_compile(regex_HTTP_RequestLine, 0,
 		&pcre_errptr, &pcre_erroff, NULL);
@@ -240,11 +244,11 @@ void http_cleanup()
 {
 	pcre_free(pcre_HTTP_RequestLine);
 	if (pcre_extra_HTTP_RequestLine) {
-		pcre_free(pcre_extra_HTTP_RequestLine);
+		pcre_free_study(pcre_extra_HTTP_RequestLine);
 	}
 
 	pcre_free(pcre_HTTP_RequestHeaderHost);
 	if (pcre_extra_HTTP_RequestHeaderHost) {
-		pcre_free(pcre_extra_HTTP_RequestHeaderHost);
+		pcre_free_study(pcre_extra_HTTP_RequestHeaderHost);
 	}
 }

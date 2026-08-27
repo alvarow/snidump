@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <pcap/pcap.h>
@@ -20,6 +21,9 @@
 #include "http_api.h"
 
 #include "colors.h"
+
+uint8_t istty_stdout;
+uint8_t istty_stderr;
 
 /* References:
  *   netinet/ether.h
@@ -39,7 +43,7 @@ struct ether_header
   uint16_t ether_type;
 } __attribute__ ((__packed__));
 
-#define ETHERTYPE_IP 0x0800 /* IP */
+#define ETHERTYPE_IP 0x0800
 
 #if !__NO_ETHERNET__
 #define SIZE_ETHERNET sizeof(struct ether_header)
@@ -63,7 +67,6 @@ struct my_iphdr
   uint16_t check;
   uint32_t saddr;
   uint32_t daddr;
-  /*The options start here. */
 } __attribute__ ((__packed__));
 
 #define MIN_SIZE_IP (sizeof(struct my_iphdr))
@@ -71,8 +74,12 @@ struct my_iphdr
 
 #define IPVERSION 4
 
+#ifndef IPPROTO_TCP
 #define IPPROTO_TCP  6
+#endif
+#ifndef IPPROTO_UDP
 #define IPPROTO_UDP 17
+#endif
 
 /* TCP */
 
@@ -83,8 +90,8 @@ struct my_tcphdr
   uint32_t seq;
   uint32_t ack_seq;
   uint8_t  res1doff;
-#define TCP_OFF(th)      (((th)->res1doff & 0xF0) >> 4)
-	uint8_t  flags;
+#define TCP_OFF(th) (((th)->res1doff & 0xF0) >> 4)
+  uint8_t  flags;
 #define TCP_FIN  (0x1 << 0)
 #define TCP_SYN  (0x1 << 1)
 #define TCP_RST  (0x1 << 2)
@@ -115,85 +122,130 @@ struct udphdr
 
 
 /* converts 16 bits in host byte order to 16 bits in network byte order */
-#if !__BIG_ENDIAN__
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define h16ton16(n) (n)
+#else
 #define h16ton16(n) \
 ((uint16_t) (((uint16_t) n) << 8) | (uint16_t) (((uint16_t) n) >> 8))
-#else
-#define h16ton16(n) (n)
 #endif
 
 #define n16toh16(n) h16ton16(n)
 
-#define likely(x)       __builtin_expect((x),1)
-#define unlikely(x)     __builtin_expect((x),0)
+#define likely(x)   __builtin_expect((x),1)
+#define unlikely(x) __builtin_expect((x),0)
 
 
-pcap_t *pcap_handle;
-pcap_dumper_t * pcap_dumper_handle;
+/* -------------------------------------------------------------------------
+ * Per-packet context
+ *
+ * Replaces the previous scatter of file-scope globals.  A single instance
+ * lives in main() and is passed to pcap_loop as the user pointer; a static
+ * pointer (g_ctx) is set at the start of each callback so that sni_handler
+ * (which has a fixed signature imposed by the API) can reach it.
+ * -------------------------------------------------------------------------
+ */
 
+struct packet_ctx {
+	struct my_iphdr   *ip;
+	uint16_t           src_port;
+	uint16_t           dst_port;
+	uint8_t            flag_sni_available;
+	pcap_dumper_t     *pcap_dumper_handle;
+	uint8_t            opt_quiet;
+	uint8_t            opt_timestamp;
+	uint8_t            opt_json;
+	const char        *current_proto; /* "TLS" or "HTTP", set before each engine */
+};
 
-struct my_iphdr *ip;
+static struct packet_ctx *g_ctx;
 
-uint16_t src_port;
-uint16_t dst_port;
+static void timestamp_now(char *buf, size_t bufsz)
+{
+	time_t t;
+	struct tm tmbuf;
+	time(&t);
+	strftime(buf, bufsz, "%Y-%m-%dT%H:%M:%SZ", gmtime_r(&t, &tmbuf));
+}
 
+int sni_handler(uint8_t *host_name, uint16_t host_name_length)
+{
+	struct packet_ctx *ctx = g_ctx;
+	char ts[32];
 
-uint8_t flag_sni_available;
-
-int sni_handler (uint8_t *host_name, uint16_t host_name_length) {
-	uint16_t i;
-
-	fprintf(stdout, "%u.%u.%u.%u:%u -> %u.%u.%u.%u:[%u] ",
-		*(((uint8_t *)&(ip->saddr)) + 0),
-		*(((uint8_t *)&(ip->saddr)) + 1),
-		*(((uint8_t *)&(ip->saddr)) + 2),
-		*(((uint8_t *)&(ip->saddr)) + 3),
-		n16toh16(src_port),
-		*(((uint8_t *)&(ip->daddr)) + 0),
-		*(((uint8_t *)&(ip->daddr)) + 1),
-		*(((uint8_t *)&(ip->daddr)) + 2),
-		*(((uint8_t *)&(ip->daddr)) + 3),
-		n16toh16(dst_port));
-
-
-	CPRINT_STDOUT(C_RED_LIGHT, "%u:", host_name_length);
-	for (i = 0; i < host_name_length; i++) {
-		CPRINT_STDOUT(C_RED_LIGHT, "%c", host_name[i]);
+	if (ctx->opt_json) {
+		timestamp_now(ts, sizeof(ts));
+		fprintf(stdout,
+			"{\"time\":\"%s\",\"proto\":\"%s\","
+			"\"src\":\"%u.%u.%u.%u:%u\","
+			"\"dst\":\"%u.%u.%u.%u:%u\","
+			"\"host\":\"%.*s\"}\n",
+			ts,
+			ctx->current_proto,
+			*(((uint8_t *)&(ctx->ip->saddr)) + 0),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 1),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 2),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 3),
+			n16toh16(ctx->src_port),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 0),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 1),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 2),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 3),
+			n16toh16(ctx->dst_port),
+			(int)host_name_length, (char *)host_name);
+	} else {
+		if (ctx->opt_timestamp) {
+			timestamp_now(ts, sizeof(ts));
+			fprintf(stdout, "%s ", ts);
+		}
+		fprintf(stdout, "%u.%u.%u.%u:%u -> %u.%u.%u.%u:[%u] ",
+			*(((uint8_t *)&(ctx->ip->saddr)) + 0),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 1),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 2),
+			*(((uint8_t *)&(ctx->ip->saddr)) + 3),
+			n16toh16(ctx->src_port),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 0),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 1),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 2),
+			*(((uint8_t *)&(ctx->ip->daddr)) + 3),
+			n16toh16(ctx->dst_port));
+		CPRINT_STDOUT(C_RED_LIGHT, "%u:%.*s\n", host_name_length,
+			(int)host_name_length, (char *)host_name);
 	}
-	fprintf(stdout, "\n");
 
-	flag_sni_available = 1;
-
+	ctx->flag_sni_available = 1;
 	return 0;
 }
 
 
-void my_pcap_handler (uint8_t *user, const struct pcap_pkthdr *header,
+void my_pcap_handler(uint8_t *user, const struct pcap_pkthdr *header,
 	const uint8_t *packet)
 {
+	struct packet_ctx *ctx = (struct packet_ctx *)user;
+	g_ctx = ctx;
+
 #if !__NO_ETHERNET__
 	struct ether_header *ether;
 #endif
 	struct my_tcphdr *tcp;
-	struct udphdr *udp;
+	struct udphdr    *udp;
 
-	uint8_t *payload;
-	uint16_t payload_length;
+	uint8_t  *payload;
+	uint16_t  payload_length;
 
 	uint16_t r;
 
 	if (header->caplen < header->len) {
 #if __DEBUG__
-		fprintf(stderr,
-			"WARNING: caplen %u < len %u. Ignoring.\n",
+		fprintf(stderr, "WARNING: caplen %u < len %u. Ignoring.\n",
 			header->caplen, header->len);
 #endif
 		return;
 	}
 
 #if !__NO_ETHERNET__
-	/* Process ethernet header */
-	assert(header->caplen >= SIZE_ETHERNET);
+	if (header->caplen < SIZE_ETHERNET) {
+		return;
+	}
 
 	ether = (struct ether_header *) packet;
 	if (unlikely(ether->ether_type != h16ton16(ETHERTYPE_IP))) {
@@ -205,90 +257,103 @@ void my_pcap_handler (uint8_t *user, const struct pcap_pkthdr *header,
 	}
 #endif
 
-	/* Process IP header */
-	assert(header->caplen >= SIZE_ETHERNET + MIN_SIZE_IP);
+	if (header->caplen < SIZE_ETHERNET + MIN_SIZE_IP) {
+		return;
+	}
 
-	ip = (struct my_iphdr *) (packet + SIZE_ETHERNET);
-	if (unlikely(IP_V(ip) != IPVERSION)) {
+	ctx->ip = (struct my_iphdr *)(packet + SIZE_ETHERNET);
+	if (unlikely(IP_V(ctx->ip) != IPVERSION)) {
 #if __DEBUG__
 		fprintf(stderr, "WARNING: IP_V(ip) != 4. Ignoring.\n");
 #endif
 		return;
 	}
 
-	switch(ip->protocol) {
+	switch (ctx->ip->protocol) {
 		case IPPROTO_TCP: {
-				/* Process TCP header */
-				assert(header->caplen >=
-					SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)) + MIN_SIZE_TCP);
+				if (header->caplen <
+					SIZE_ETHERNET + (IP_HL(ctx->ip) * sizeof(uint32_t)) +
+					MIN_SIZE_TCP) {
+					return;
+				}
 
 				tcp = (struct my_tcphdr *)
-					(packet + SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)));
-				src_port = tcp->source;
-				dst_port = tcp->dest;
+					(packet + SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)));
+				ctx->src_port = tcp->source;
+				ctx->dst_port = tcp->dest;
 
-				/* Make sure we have captured the entire packet. */
-				assert(header->caplen >= SIZE_ETHERNET +
-					(IP_HL(ip) * sizeof(uint32_t)) + (TCP_OFF(tcp) * sizeof(uint32_t)));
+				if (header->caplen < SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+					(TCP_OFF(tcp) * sizeof(uint32_t))) {
+					return;
+				}
 
-				/* Figure out payload. */
 				payload = (uint8_t *)
-					(packet + SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)) +
+					(packet + SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
 					(TCP_OFF(tcp) * sizeof(uint32_t)));
 				payload_length = header->caplen - SIZE_ETHERNET -
-					(IP_HL(ip) * sizeof(uint32_t)) - (TCP_OFF(tcp) * sizeof(uint32_t));
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) -
+					(TCP_OFF(tcp) * sizeof(uint32_t));
 			}
 			break;
 		case IPPROTO_UDP: {
-				/* Process UDP header */
-				assert(header->caplen >=
-					SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)) + MIN_SIZE_UDP);
+				if (header->caplen <
+					SIZE_ETHERNET + (IP_HL(ctx->ip) * sizeof(uint32_t)) +
+					MIN_SIZE_UDP) {
+					return;
+				}
 				udp = (struct udphdr *)
-					(packet + SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)));
-				src_port = udp->source;
-				dst_port = udp->dest;
+					(packet + SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)));
+				ctx->src_port = udp->source;
+				ctx->dst_port = udp->dest;
 
-				/* Make sure we have captured the entire packet. */
-				assert(header->caplen >= SIZE_ETHERNET +
-					(IP_HL(ip) * sizeof(uint32_t)) + sizeof(struct udphdr));
+				if (header->caplen < SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
+					sizeof(struct udphdr)) {
+					return;
+				}
 
-				/* Figure out payload. */
 				payload = (uint8_t *)
-					(packet + SIZE_ETHERNET + (IP_HL(ip) * sizeof(uint32_t)) +
+					(packet + SIZE_ETHERNET +
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) +
 					sizeof(struct udphdr));
 				payload_length = header->caplen - SIZE_ETHERNET -
-					(IP_HL(ip) * sizeof(uint32_t)) - sizeof(struct udphdr);
+					(IP_HL(ctx->ip) * sizeof(uint32_t)) -
+					sizeof(struct udphdr);
 			}
 			break;
 		default:
-				src_port = 0;
-				dst_port = 0;
-				payload = NULL;
+				ctx->src_port  = 0;
+				ctx->dst_port  = 0;
+				payload        = NULL;
 				payload_length = 0;
 #if __DEBUG__
 			fprintf(stderr, "WARNING: ip->protocol == %u. Ignoring.\n",
-				ip->protocol);
+				ctx->ip->protocol);
 #endif
 			break;
 	}
 
-	/* Save to dump file. */
-	if (pcap_dumper_handle) {
-		pcap_dump((u_char *)pcap_dumper_handle, header, packet);
+	/* Save to dump file (all BPF-matched packets, regardless of parse result). */
+	if (ctx->pcap_dumper_handle) {
+		pcap_dump((u_char *)ctx->pcap_dumper_handle, header, packet);
 	}
 
 #if __DEBUG__
 	fprintf(stderr, "%u.%u.%u.%u:%u -> %u.%u.%u.%u:[%u] (payload:%u)\n",
-		*(((uint8_t *)&(ip->saddr)) + 0),
-		*(((uint8_t *)&(ip->saddr)) + 1),
-		*(((uint8_t *)&(ip->saddr)) + 2),
-		*(((uint8_t *)&(ip->saddr)) + 3),
-		n16toh16(src_port),
-		*(((uint8_t *)&(ip->daddr)) + 0),
-		*(((uint8_t *)&(ip->daddr)) + 1),
-		*(((uint8_t *)&(ip->daddr)) + 2),
-		*(((uint8_t *)&(ip->daddr)) + 3),
-		n16toh16(dst_port),
+		*(((uint8_t *)&(ctx->ip->saddr)) + 0),
+		*(((uint8_t *)&(ctx->ip->saddr)) + 1),
+		*(((uint8_t *)&(ctx->ip->saddr)) + 2),
+		*(((uint8_t *)&(ctx->ip->saddr)) + 3),
+		n16toh16(ctx->src_port),
+		*(((uint8_t *)&(ctx->ip->daddr)) + 0),
+		*(((uint8_t *)&(ctx->ip->daddr)) + 1),
+		*(((uint8_t *)&(ctx->ip->daddr)) + 2),
+		*(((uint8_t *)&(ctx->ip->daddr)) + 3),
+		n16toh16(ctx->dst_port),
 		payload_length);
 #endif
 
@@ -296,28 +361,21 @@ void my_pcap_handler (uint8_t *user, const struct pcap_pkthdr *header,
 		return;
 	}
 
-	/* Reset flag_sni_available. If it is set following any of the processing
-	 * engines we know we have found the server's name and we can stop.
-	 */
-	flag_sni_available = 0;
+	ctx->flag_sni_available = 0;
 
+	ctx->current_proto = "TLS";
 	r = tls_process_record(payload, payload_length);
 #if __DEBUG__
-	/* It's not ideal to have bytes left unprocessed by the engine.
-	 * This is usually because of fragmented application messages.
-	 * (e.g., a TLS handshake record spread across packets)
-	 */
 	if (r < payload_length) {
-		fprintf(stderr, "process_TLS_record() processed %u / %u bytes.\n",
+		fprintf(stderr, "tls_process_record() processed %u / %u bytes.\n",
 			r, payload_length);
 	}
 #endif
-	/* If flag_sni_available then we have done. */
-	/* If we have processed more than zero bytes then we are (probably) done. */
-	if (flag_sni_available || r != 0) {
+	if (ctx->flag_sni_available || r != 0) {
 		return;
 	}
 
+	ctx->current_proto = "HTTP";
 	r = http_process_request(payload, payload_length);
 #if __DEBUG__
 	if (r < payload_length) {
@@ -325,27 +383,32 @@ void my_pcap_handler (uint8_t *user, const struct pcap_pkthdr *header,
 			r, payload_length);
 	}
 #endif
-	if (flag_sni_available || r != 0) {
-		return;
-	}
-
-	return;
+	(void)r;
 }
 
 
-void signal_handler (int signum)
+/* -------------------------------------------------------------------------
+ * Signal handling
+ *
+ * g_stop is set by the signal handler.  pcap_breakloop is also called
+ * (it just sets a flag inside the pcap handle) so pcap_loop returns
+ * promptly rather than waiting for the next batch timeout.
+ *
+ * SIGSEGV is intentionally NOT handled here; a real segfault should
+ * terminate the process and produce a core dump for debugging.
+ * -------------------------------------------------------------------------
+ */
+
+static pcap_t *pcap_handle;
+static volatile sig_atomic_t g_stop = 0;
+
+static void signal_handler(int signum)
 {
-	switch(signum) {
-		case SIGTERM:
-		case SIGINT:
-		case SIGSEGV:
-			fprintf(stdout, "\n");
-			pcap_breakloop(pcap_handle);
-			break;
-		default:
-			break;
-	}
+	(void)signum;
+	g_stop = 1;
+	pcap_breakloop(pcap_handle);
 }
+
 
 #define SNAPLEN 65535
 #define PROMISCUOUS ((opt_flags & OPT_PROMISCUOUS) == OPT_PROMISCUOUS)
@@ -357,11 +420,9 @@ void signal_handler (int signum)
 #define BPF bpf_s
 #define BPF_OPTIMIZE 1
 
-int main (int argc, char *argv[])
+int main(int argc, char *argv[])
 {
-	/* Name of the network interface to capture from. */
 	char *device_name;
-	/* Name of the file with the pcap trace to read from. */
 	char *trace_fname;
 
 	char errbuf[PCAP_ERRBUF_SIZE];
@@ -370,14 +431,12 @@ int main (int argc, char *argv[])
 	char *bpf_default = BPF_DEFAULT;
 	struct bpf_program bpf;
 
-	/* Name of the file to write the pcap trace to. */
 	char *dump_fname;
 #if __DEBUG__
 	unsigned int dump_fname_sz;
 #endif
 
 	struct pcap_stat ps;
-
 	struct sigaction act;
 
 	int i;
@@ -386,23 +445,35 @@ int main (int argc, char *argv[])
 #define OPT_BPF         (0x1 << 2)
 #define OPT_TRACE       (0x1 << 3)
 #define OPT_DUMP        (0x1 << 4)
+#define OPT_QUIET       (0x1 << 5)
+#define OPT_TIMESTAMP   (0x1 << 6)
+#define OPT_JSON        (0x1 << 7)
 	uint8_t opt_flags;
 
-	opt_flags = 0;
+	struct packet_ctx pkt_ctx;
 
+	opt_flags = 0;
+	memset(&pkt_ctx, 0, sizeof(pkt_ctx));
 	memset(errbuf, 0, PCAP_ERRBUF_SIZE);
 
 	CPRINT_INIT
 
-	while ((i = getopt(argc, argv, "hf:pi:r:w:")) != -1) {
-		switch(i) {
+	while ((i = getopt(argc, argv, "hf:pi:r:w:qtj")) != -1) {
+		switch (i) {
 			case 'h':
 				fprintf(stderr,
-					"Use: %s [-h] [-f bpf] [-p] -i interface [-w dump.pcap]\n", argv[0]);
+					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] "
+					"-i interface [-w dump.pcap]\n", argv[0]);
 				fprintf(stderr,
-					"Use: %s [-h] [-f bpf] [-p] -r trce.pcap [-w dump.pcap]\n", argv[0]);
+					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] "
+					"-r trce.pcap  [-w dump.pcap]\n", argv[0]);
+				fprintf(stderr,
+					"  -q  quiet: suppress informational output\n");
+				fprintf(stderr,
+					"  -t  prefix each hostname line with a UTC timestamp\n");
+				fprintf(stderr,
+					"  -j  JSON output (one object per line, includes timestamp)\n");
 				return -1;
-				break;
 			case 'f':
 				bpf_s = optarg;
 				opt_flags |= OPT_BPF;
@@ -422,30 +493,53 @@ int main (int argc, char *argv[])
 				dump_fname = optarg;
 				opt_flags |= OPT_DUMP;
 				break;
+			case 'q':
+				opt_flags |= OPT_QUIET;
+				break;
+			case 't':
+				opt_flags |= OPT_TIMESTAMP;
+				break;
+			case 'j':
+				opt_flags |= OPT_JSON;
+				break;
 			default:
 				break;
 		}
 	}
 
+	pkt_ctx.opt_quiet     = (opt_flags & OPT_QUIET)     ? 1 : 0;
+	pkt_ctx.opt_timestamp = (opt_flags & OPT_TIMESTAMP) ? 1 : 0;
+	pkt_ctx.opt_json      = (opt_flags & OPT_JSON)      ? 1 : 0;
+
 	if (!(opt_flags & (OPT_DEVICE | OPT_TRACE))) {
 		fprintf(stderr,
-			"[FATAL] Missing target interface or trace file. Try with -h.\n");
+			"[FATAL] Missing target interface or trace file. Try -h.\n");
+		return -1;
+	}
+
+	if ((opt_flags & OPT_DEVICE) && (opt_flags & OPT_TRACE)) {
+		fprintf(stderr,
+			"[FATAL] Cannot specify both -i and -r. Try -h.\n");
 		return -1;
 	}
 
 #if __DEBUG__
-#if !__BIG_ENDIAN__
-	fprintf(stderr, "LITTLE_ENDIAN\n");
-#else
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 	fprintf(stderr, "BIG_ENDIAN\n");
+#else
+	fprintf(stderr, "LITTLE_ENDIAN\n");
 #endif
 #endif
 
-	fprintf(stdout, "[*] PID: %u\n", getpid());
+	if (!pkt_ctx.opt_quiet) {
+		fprintf(stdout, "[*] PID: %u\n", getpid());
+	}
 
 	if (opt_flags & OPT_DEVICE) {
-		fprintf(stdout, "[*] Device: '%s'\n", device_name);
-		fprintf(stdout, "[*] Promiscuous: %d\n", PROMISCUOUS);
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stdout, "[*] Device: '%s'\n", device_name);
+			fprintf(stdout, "[*] Promiscuous: %d\n", PROMISCUOUS);
+		}
 
 		if (!(pcap_handle =
 			pcap_open_live(device_name, SNAPLEN, PROMISCUOUS, PCAP_TIMEOUT,
@@ -456,7 +550,9 @@ int main (int argc, char *argv[])
 	}
 
 	if (opt_flags & OPT_TRACE) {
-		fprintf(stdout, "[*] Trace: '%s'\n", trace_fname);
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stdout, "[*] Trace: '%s'\n", trace_fname);
+		}
 
 		if (!(pcap_handle =
 			pcap_open_offline(trace_fname, errbuf))) {
@@ -465,13 +561,37 @@ int main (int argc, char *argv[])
 		}
 	}
 
-	/* BPF is not set. We'll use the default. */
+	{
+#if !__NO_ETHERNET__
+		const int   expected_dlt      = DLT_EN10MB;
+		const char *expected_dlt_name = "EN10MB (Ethernet)";
+#else
+		const int   expected_dlt      = DLT_RAW;
+		const char *expected_dlt_name = "RAW (raw IP)";
+#endif
+		int dlt = pcap_datalink(pcap_handle);
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stdout, "[*] Datalink: %s (%d)\n",
+				pcap_datalink_val_to_name(dlt), dlt);
+		}
+		if (dlt != expected_dlt) {
+			fprintf(stderr,
+				"[FATAL] Unexpected datalink type %s (%d); expected %s. "
+				"Use snidump_noether for raw-IP interfaces.\n",
+				pcap_datalink_val_to_name(dlt), dlt, expected_dlt_name);
+			pcap_close(pcap_handle);
+			return -1;
+		}
+	}
+
 	if (!(opt_flags & OPT_BPF)) {
 		bpf_s = bpf_default;
 		opt_flags |= OPT_BPF;
 	}
 
-	fprintf(stdout, "[*] BPF: '%s'\n", bpf_s);
+	if (!pkt_ctx.opt_quiet) {
+		fprintf(stdout, "[*] BPF: '%s'\n", bpf_s);
+	}
 
 	if (pcap_compile(pcap_handle, &bpf, BPF, BPF_OPTIMIZE,
 		PCAP_NETMASK_UNKNOWN) == -1) {
@@ -490,12 +610,15 @@ int main (int argc, char *argv[])
 
 	pcap_freecode(&bpf);
 
-	pcap_dumper_handle = NULL;
+	pkt_ctx.pcap_dumper_handle = NULL;
 
 	if (opt_flags & OPT_DUMP) {
-		fprintf(stdout, "[*] Dump: '%s'\n", dump_fname);
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stdout, "[*] Dump: '%s'\n", dump_fname);
+		}
 
-		if (!(pcap_dumper_handle = pcap_dump_open(pcap_handle, dump_fname))) {
+		if (!(pkt_ctx.pcap_dumper_handle =
+			pcap_dump_open(pcap_handle, dump_fname))) {
 			fprintf(stderr, "[WARNING] Couldn't create dump file. %s\n",
 				pcap_geterr(pcap_handle));
 		}
@@ -509,7 +632,8 @@ int main (int argc, char *argv[])
 			return -1;
 		}
 		snprintf(dump_fname, dump_fname_sz, "%s%s", device_name, ".pcap");
-		if (!(pcap_dumper_handle = pcap_dump_open(pcap_handle, dump_fname))) {
+		if (!(pkt_ctx.pcap_dumper_handle =
+			pcap_dump_open(pcap_handle, dump_fname))) {
 			pcap_geterr(pcap_handle);
 		}
 	}
@@ -521,40 +645,43 @@ int main (int argc, char *argv[])
 	http_init();
 
 	act.sa_handler = signal_handler;
-	sigemptyset (&act.sa_mask);
+	sigemptyset(&act.sa_mask);
 	act.sa_flags = 0;
 
 	if (sigaction(SIGINT, &act, NULL)) {
 		perror("sigaction");
-		fprintf(stderr,
-			"[WARNING] Failed to set signal handler for SIGINT.\n");
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stderr,
+				"[WARNING] Failed to set signal handler for SIGINT.\n");
+		}
 	}
 
 	if (sigaction(SIGTERM, &act, NULL)) {
 		perror("sigaction");
-		fprintf(stderr,
-			"[WARNING] Failed to set signal handler for SIGTERM.\n");
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stderr,
+				"[WARNING] Failed to set signal handler for SIGTERM.\n");
+		}
 	}
 
-	if (sigaction(SIGSEGV, &act, NULL)) {
-		perror("sigaction");
-		fprintf(stderr,
-			"[WARNING] Failed to set signal handler for SIGSEGV.\n");
+	if (!pkt_ctx.opt_quiet) {
+		fprintf(stderr, "Capturing ...\n");
 	}
 
-	fprintf(stderr, "Capturing ...\n");
-
-	if (pcap_loop(pcap_handle, -1, &my_pcap_handler, NULL) == -1) {
+	if (pcap_loop(pcap_handle, -1, &my_pcap_handler, (u_char *)&pkt_ctx)
+		== -1) {
 		fprintf(stderr, "[FATAL] pcap_loop failed. %s\n",
 			pcap_geterr(pcap_handle));
 	}
 
-	if (!(opt_flags & OPT_TRACE)) {
+	if (!(opt_flags & OPT_TRACE) && !pkt_ctx.opt_quiet) {
 		if (pcap_stats(pcap_handle, &ps) == -1) {
-			fprintf(stderr, "pcap_stats failed. %s\n", pcap_geterr(pcap_handle));
+			fprintf(stderr, "pcap_stats failed. %s\n",
+				pcap_geterr(pcap_handle));
 		} else {
 			fprintf(stderr, "%u packets received\n", ps.ps_recv);
-			fprintf(stderr, "%u packets dropped\n", ps.ps_drop + ps.ps_ifdrop);
+			fprintf(stderr, "%u packets dropped\n",
+				ps.ps_drop + ps.ps_ifdrop);
 		}
 	}
 
@@ -562,16 +689,20 @@ int main (int argc, char *argv[])
 
 	http_cleanup();
 
-	if (pcap_dumper_handle) {
-		pcap_dump_close(pcap_dumper_handle);
+	if (pkt_ctx.pcap_dumper_handle) {
+		pcap_dump_close(pkt_ctx.pcap_dumper_handle);
 
-		fprintf(stderr, "Written %s\n", dump_fname);
+		if (!pkt_ctx.opt_quiet) {
+			fprintf(stderr, "Written %s\n", dump_fname);
+		}
 		if (!(opt_flags & OPT_DUMP)) {
 			free(dump_fname);
 		}
 	}
 
-	fprintf(stderr, "Goodbye\n");
+	if (!pkt_ctx.opt_quiet) {
+		fprintf(stderr, "Goodbye\n");
+	}
 
 	return 0;
 }

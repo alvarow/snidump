@@ -5,10 +5,10 @@
 #include <unistd.h>
 
 #define IFTTY_STDOUT(x) (istty_stdout ? (x) : "")
-uint8_t istty_stdout;
+extern uint8_t istty_stdout;
 
 #define IFTTY_STDERR(x) (istty_stderr ? (x) : "")
-uint8_t istty_stderr;
+extern uint8_t istty_stderr;
 
 #define C_RED_LIGHT    "1;31"
 #define C_GREEN_LIGHT  "1;32"
@@ -27,9 +27,9 @@ uint8_t istty_stderr;
  * X:YZ is a C_ color as defined above.
  */
 #define CPRINT_STDOUT(color, format, ...) fprintf(stdout, "%s" format "%s", \
-  IFTTY_STDOUT("\033[" color "m"), __VA_ARGS__, IFTTY_STDOUT("\033[0m"))
+  IFTTY_STDOUT("\033[" color "m"), ##__VA_ARGS__, IFTTY_STDOUT("\033[0m"))
 
 #define CPRINT_STDERR(color, format, ...) fprintf(stderr, "%s" format "%s", \
-  IFTTY_STDERR("\033[" color "m"), __VA_ARGS__, IFTTY_STDERR("\033[0m"))
+  IFTTY_STDERR("\033[" color "m"), ##__VA_ARGS__, IFTTY_STDERR("\033[0m"))
 
 #endif
