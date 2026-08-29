@@ -262,10 +262,13 @@ struct packet_ctx {
 	uint8_t            opt_quiet;
 	uint8_t            opt_timestamp;
 	uint8_t            opt_json;
+	uint32_t           opt_count;   /* 0 = unlimited */
+	uint32_t           match_count;
 	const char        *current_proto;
 };
 
 static struct packet_ctx *g_ctx;
+static pcap_t *pcap_handle; /* forward declaration; defined in signal section */
 
 static void timestamp_now(char *buf, size_t bufsz)
 {
@@ -308,18 +311,65 @@ int sni_handler(uint8_t *host_name, uint16_t host_name_length)
 	fmt_addr(src_addr, sizeof(src_addr), ctx, 1);
 	fmt_addr(dst_addr, sizeof(dst_addr), ctx, 0);
 
+	/*
+	 * Strip an optional :port suffix from HTTP Host header values.
+	 * e.g. "example.com:8080" -> host="example.com", host_port=8080
+	 * TLS SNI never carries a port, so this only runs for HTTP.
+	 *
+	 * Scan from the right for the last ':' followed entirely by ASCII
+	 * digits.  IPv6 bracket notation (e.g. "[::1]:8080") is handled
+	 * correctly: the ']' before the ':' is not a digit, so the colon
+	 * inside the brackets is never mis-identified as a port separator.
+	 */
+	uint16_t hostname_len = host_name_length;
+	uint16_t host_port    = 0;
+	if (ctx->current_proto[0] == 'H') { /* "HTTP" */
+		int k;
+		for (k = (int)host_name_length - 1; k > 0; k--) {
+			if (host_name[k] == ':') {
+				int m;
+				unsigned long p = 0;
+				for (m = k + 1; m < (int)host_name_length; m++) {
+					if (host_name[m] < '0' || host_name[m] > '9') {
+						p = 0;
+						break;
+					}
+					p = p * 10 + (host_name[m] - '0');
+				}
+				if (p > 0 && p <= 65535 && m > k + 1) {
+					host_port    = (uint16_t)p;
+					hostname_len = (uint16_t)k;
+				}
+				break;
+			}
+		}
+	}
+
 	if (ctx->opt_json) {
 		timestamp_now(ts, sizeof(ts));
-		fprintf(stdout,
-			"{\"time\":\"%s\",\"proto\":\"%s\","
-			"\"src\":\"%s:%u\","
-			"\"dst\":\"%s:%u\","
-			"\"host\":\"%.*s\"}\n",
-			ts,
-			ctx->current_proto,
-			src_addr, n16toh16(ctx->src_port),
-			dst_addr, n16toh16(ctx->dst_port),
-			(int)host_name_length, (char *)host_name);
+		if (host_port) {
+			fprintf(stdout,
+				"{\"time\":\"%s\",\"proto\":\"%s\","
+				"\"src\":\"%s:%u\","
+				"\"dst\":\"%s:%u\","
+				"\"host\":\"%.*s\","
+				"\"port\":%u}\n",
+				ts, ctx->current_proto,
+				src_addr, n16toh16(ctx->src_port),
+				dst_addr, n16toh16(ctx->dst_port),
+				(int)hostname_len, (char *)host_name,
+				host_port);
+		} else {
+			fprintf(stdout,
+				"{\"time\":\"%s\",\"proto\":\"%s\","
+				"\"src\":\"%s:%u\","
+				"\"dst\":\"%s:%u\","
+				"\"host\":\"%.*s\"}\n",
+				ts, ctx->current_proto,
+				src_addr, n16toh16(ctx->src_port),
+				dst_addr, n16toh16(ctx->dst_port),
+				(int)hostname_len, (char *)host_name);
+		}
 	} else {
 		if (ctx->opt_timestamp) {
 			timestamp_now(ts, sizeof(ts));
@@ -328,11 +378,16 @@ int sni_handler(uint8_t *host_name, uint16_t host_name_length)
 		fprintf(stdout, "%s:%u -> %s:[%u] ",
 			src_addr, n16toh16(ctx->src_port),
 			dst_addr, n16toh16(ctx->dst_port));
-		CPRINT_STDOUT(C_RED_LIGHT, "%u:%.*s\n", host_name_length,
-			(int)host_name_length, (char *)host_name);
+		CPRINT_STDOUT(C_RED_LIGHT, "%u:%.*s\n", hostname_len,
+			(int)hostname_len, (char *)host_name);
 	}
 
 	ctx->flag_sni_available = 1;
+
+	if (ctx->opt_count > 0 && ++ctx->match_count >= ctx->opt_count) {
+		pcap_breakloop(pcap_handle);
+	}
+
 	return 0;
 }
 
@@ -604,7 +659,6 @@ void my_pcap_handler(uint8_t *user, const struct pcap_pkthdr *header,
  * -------------------------------------------------------------------------
  */
 
-static pcap_t *pcap_handle;
 static volatile sig_atomic_t g_stop = 0;
 
 static void signal_handler(int signum)
@@ -664,21 +718,23 @@ int main(int argc, char *argv[])
 
 	CPRINT_INIT
 
-	while ((i = getopt(argc, argv, "hf:pi:r:w:qtj")) != -1) {
+	while ((i = getopt(argc, argv, "hf:pi:r:w:qtjc:")) != -1) {
 		switch (i) {
 			case 'h':
 				fprintf(stderr,
-					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] "
+					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] "
 					"-i interface [-w dump.pcap]\n", argv[0]);
 				fprintf(stderr,
-					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] "
+					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] "
 					"-r trce.pcap  [-w dump.pcap]\n", argv[0]);
 				fprintf(stderr,
-					"  -q  quiet: suppress informational output\n");
+					"  -q    quiet: suppress informational output\n");
 				fprintf(stderr,
-					"  -t  prefix each hostname line with a UTC timestamp\n");
+					"  -t    prefix each hostname line with a UTC timestamp\n");
 				fprintf(stderr,
-					"  -j  JSON output (one object per line, includes timestamp)\n");
+					"  -j    JSON output (one object per line, includes timestamp)\n");
+				fprintf(stderr,
+					"  -c N  stop after N hostname matches\n");
 				return -1;
 			case 'f':
 				bpf_s = optarg;
@@ -708,6 +764,18 @@ int main(int argc, char *argv[])
 			case 'j':
 				opt_flags |= OPT_JSON;
 				break;
+			case 'c': {
+				char *end;
+				unsigned long n = strtoul(optarg, &end, 10);
+				if (*end != '\0' || n == 0) {
+					fprintf(stderr,
+						"[FATAL] -c requires a positive integer.\n");
+					return -1;
+				}
+				pkt_ctx.opt_count = (uint32_t)(n > UINT32_MAX
+					? UINT32_MAX : n);
+				break;
+			}
 			default:
 				break;
 		}
