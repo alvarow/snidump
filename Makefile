@@ -1,5 +1,9 @@
 .PHONY: all debug clean install uninstall check-deps
 
+# Default goal — must be declared before check-deps so that bare 'make'
+# builds the binaries rather than stopping after the dependency check.
+.DEFAULT_GOAL := all
+
 # Compiler — defaults to gcc; override from command line if needed:
 #   FreeBSD : make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 CC      = gcc
