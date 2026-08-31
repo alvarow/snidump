@@ -279,6 +279,22 @@ static void timestamp_now(char *buf, size_t bufsz)
 }
 
 /*
+ * Write a JSON-escaped string to fp.
+ * Escapes '"' and '\' per RFC 8259; control characters become \uXXXX.
+ * Written directly to fp to avoid a potentially large stack buffer.
+ */
+static void json_write_escaped(FILE *fp, const uint8_t *s, int len)
+{
+	int i;
+	for (i = 0; i < len; i++) {
+		if      (s[i] == '"')  fputs("\\\"", fp);
+		else if (s[i] == '\\') fputs("\\\\", fp);
+		else if (s[i] < 0x20)  fprintf(fp, "\\u%04x", (unsigned)s[i]);
+		else                   fputc(s[i], fp);
+	}
+}
+
+/*
  * Format the source or destination IP address into buf.
  * IPv4: "w.x.y.z"
  * IPv6: "[addr]"  (brackets so "addr:port" is unambiguous)
@@ -347,28 +363,19 @@ int sni_handler(uint8_t *host_name, uint16_t host_name_length)
 
 	if (ctx->opt_json) {
 		timestamp_now(ts, sizeof(ts));
+		fprintf(stdout,
+			"{\"time\":\"%s\",\"proto\":\"%s\","
+			"\"src\":\"%s:%u\","
+			"\"dst\":\"%s:%u\","
+			"\"host\":\"",
+			ts, ctx->current_proto,
+			src_addr, n16toh16(ctx->src_port),
+			dst_addr, n16toh16(ctx->dst_port));
+		json_write_escaped(stdout, host_name, (int)hostname_len);
 		if (host_port) {
-			fprintf(stdout,
-				"{\"time\":\"%s\",\"proto\":\"%s\","
-				"\"src\":\"%s:%u\","
-				"\"dst\":\"%s:%u\","
-				"\"host\":\"%.*s\","
-				"\"port\":%u}\n",
-				ts, ctx->current_proto,
-				src_addr, n16toh16(ctx->src_port),
-				dst_addr, n16toh16(ctx->dst_port),
-				(int)hostname_len, (char *)host_name,
-				host_port);
+			fprintf(stdout, "\",\"port\":%u}\n", host_port);
 		} else {
-			fprintf(stdout,
-				"{\"time\":\"%s\",\"proto\":\"%s\","
-				"\"src\":\"%s:%u\","
-				"\"dst\":\"%s:%u\","
-				"\"host\":\"%.*s\"}\n",
-				ts, ctx->current_proto,
-				src_addr, n16toh16(ctx->src_port),
-				dst_addr, n16toh16(ctx->dst_port),
-				(int)hostname_len, (char *)host_name);
+			fputs("\"}\n", stdout);
 		}
 	} else {
 		if (ctx->opt_timestamp) {

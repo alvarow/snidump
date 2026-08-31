@@ -9,12 +9,13 @@ PCAP trace file.  Output can be plain text, timestamped, or JSON.  Matching
 packets can be saved to a new PCAP file.
 
 ```
-Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -i interface [-w dump.pcap]
-Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -r trce.pcap  [-w dump.pcap]
+Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] -i interface [-w dump.pcap]
+Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] -r trce.pcap  [-w dump.pcap]
 
-  -q  quiet: suppress informational output
-  -t  prefix each hostname line with a UTC timestamp
-  -j  JSON output (one object per line, includes timestamp)
+  -q    quiet: suppress informational output
+  -t    prefix each hostname line with a UTC timestamp
+  -j    JSON output (one object per line, includes timestamp)
+  -c N  stop after N hostname matches
 ```
 
 **Dependencies:** `libpcap`, `libpcre`
@@ -26,9 +27,12 @@ Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -r trce.pcap  [-w dump.pcap]
 sudo apt install libpcap-dev libpcre3-dev
 make
 
-# FreeBSD (libpcap is in base)
+# FreeBSD / pfSense
+# libpcap is in the base system; only pcre needs to be installed from ports.
+# The Makefile defaults to gcc; on FreeBSD (and pfSense, which is FreeBSD-based)
+# use clang and point it at the /usr/local prefix where ports install headers/libs.
 sudo pkg install pcre
-make
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 ```
 
 ## Sample output

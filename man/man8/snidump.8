@@ -187,6 +187,36 @@ could successfully parse.
 Override with
 .Fl f
 when capturing on non-standard ports or when UDP is required.
+.Sh BUILDING
+.Nm
+depends on
+.Sy libpcap
+and
+.Sy libpcre .
+.Pp
+On Debian / Ubuntu:
+.Bd -literal -offset indent
+sudo apt install libpcap-dev libpcre3-dev
+make
+.Ed
+.Pp
+On FreeBSD and pfSense
+.Pq which is FreeBSD-based ,
+.Sy libpcap
+is part of the base system.
+.Sy pcre
+must be installed from ports.
+The Makefile defaults to
+.Sy gcc ;
+use
+.Sy clang
+and supply the
+.Pa /usr/local
+prefix where ports install headers and libraries:
+.Bd -literal -offset indent
+sudo pkg install pcre
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+.Ed
 .Sh BINARIES
 Two binaries are built:
 .Bl -tag -width snidump_noether
@@ -237,6 +267,27 @@ Capture TLS on a non-standard port:
 sudo snidump -i eth0 \e
   -f '(ip or ip6) and tcp and \e
       (tcp[tcpflags] & tcp-push == tcp-push) and dst port 8443'
+.Ed
+.Pp
+Stop after the first 10 matches
+.Pq useful for quick tests or one-shot scripts :
+.Bd -literal -offset indent
+sudo snidump -c 10 -i eth0
+.Ed
+.Pp
+Capture one TLS handshake from a PCAP file and print it as JSON:
+.Bd -literal -offset indent
+snidump -qjc 1 -r capture.pcap
+.Ed
+.Pp
+The
+.Sy port
+field appears in JSON output when an HTTP
+.Em Host
+header carries an explicit port, e.g.\&
+.Sy Host:\ example.com:8080 :
+.Bd -literal -offset indent
+{"time":"...","proto":"HTTP","src":"...","dst":"...","host":"example.com","port":8080}
 .Ed
 .Pp
 Tunnel interface (no Ethernet header):
