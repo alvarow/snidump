@@ -734,6 +734,12 @@ int main(int argc, char *argv[])
 					"Use: %s [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] "
 					"-r trce.pcap  [-w dump.pcap]\n", argv[0]);
 				fprintf(stderr,
+					"  -p    promiscuous mode (live capture only)\n");
+				fprintf(stderr,
+					"  -f bpf  override the default BPF capture filter\n");
+				fprintf(stderr,
+					"  -w file  write matched packets to a pcap file\n");
+				fprintf(stderr,
 					"  -q    quiet: suppress informational output\n");
 				fprintf(stderr,
 					"  -t    prefix each hostname line with a UTC timestamp\n");
