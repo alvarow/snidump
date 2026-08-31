@@ -1,5 +1,11 @@
 .PHONY: all debug clean install uninstall
 
+# Compiler — defaults to gcc; override from command line if needed:
+#   FreeBSD : make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+CC      = gcc
+CFLAGS ?=
+LDFLAGS ?=
+
 # Installation prefix — override with: make install PREFIX=/usr
 PREFIX  ?= /usr/local
 DESTDIR ?=
@@ -7,9 +13,9 @@ DESTDIR ?=
 BINDIR  = $(DESTDIR)$(PREFIX)/bin
 MANDIR  = $(DESTDIR)$(PREFIX)/share/man
 DOCDIR  = $(DESTDIR)$(PREFIX)/share/doc/snidump
-CONTRIB_SYSTEMD = $(DESTDIR)/etc/systemd/system
+CONTRIB_SYSTEMD   = $(DESTDIR)/etc/systemd/system
 CONTRIB_LOGROTATE = $(DESTDIR)/etc/logrotate.d
-CONTRIB_RC = $(DESTDIR)/usr/local/etc/rc.d
+CONTRIB_RC        = $(DESTDIR)/usr/local/etc/rc.d
 
 INSTALL         ?= install
 INSTALL_PROGRAM ?= $(INSTALL) -m 755
@@ -22,32 +28,32 @@ debug: bin/snidump_dbg bin/snidump_noether_dbg
 
 bin/snidump: src/*
 	mkdir -p bin && \
-	gcc -D__DEBUG__=0 -Wall \
+	$(CC) $(CFLAGS) -D__DEBUG__=0 -Wall \
 		src/snidump.c src/tls.c src/http.c \
-		-lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre \
 		-o bin/snidump
 
 bin/snidump_dbg: src/*
 	mkdir -p bin && \
-	gcc -D__DEBUG__=1 -Wall -ggdb \
+	$(CC) $(CFLAGS) -D__DEBUG__=1 -Wall -ggdb \
 		src/snidump.c src/tls.c src/http.c \
-		-lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre \
 		-o bin/snidump_dbg
 
 bin/snidump_noether: src/*
 	mkdir -p bin && \
-	gcc -D__DEBUG__=0 -Wall \
+	$(CC) $(CFLAGS) -D__DEBUG__=0 -Wall \
 		-D__NO_ETHERNET__ \
 		src/snidump.c src/tls.c src/http.c \
-		-lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre \
 		-o bin/snidump_noether
 
 bin/snidump_noether_dbg: src/*
 	mkdir -p bin && \
-	gcc -D__DEBUG__=1 -Wall -ggdb \
+	$(CC) $(CFLAGS) -D__DEBUG__=1 -Wall -ggdb \
 		-D__NO_ETHERNET__ \
 		src/snidump.c src/tls.c src/http.c \
-		-lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre \
 		-o bin/snidump_noether_dbg
 
 install: all
