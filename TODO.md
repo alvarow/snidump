@@ -197,3 +197,142 @@ Chrome, Firefox, and all major CDN-fronted services (Google, Cloudflare,
 Meta, Akamai) prefer QUIC when available. On a modern client network, 30–60%
 of HTTPS connections may use QUIC. Without this feature, snidump silently
 misses a substantial and growing fraction of hostnames on port 443.
+
+---
+
+## 3. pfSense package
+
+### Background
+
+snidump has been tested on pfSense CE 2.8.1 (FreeBSD 15.0). The binary builds
+and runs correctly when cross-compiled on a FreeBSD 15 machine and copied to
+the appliance. The current deployment workflow (manual binary copy +
+`/etc/rc.conf.local` + rc.d script + `/etc/newsyslog.conf.d/`) works but
+requires SSH access and survives pfSense upgrades only with care.
+
+A proper pfSense package would make snidump installable from the web UI Package
+Manager with a single click, persist configuration through upgrades, and expose
+a browser-based settings and log viewer.
+
+### What a pfSense package consists of
+
+pfSense packages are standard FreeBSD pkg packages with pfSense-specific PHP
+files layered on top:
+
+```
+pfSense-pkg-snidump/
+├── Makefile                          # FreeBSD port Makefile
+├── distinfo                          # source checksums
+├── pkg-descr                         # one-paragraph description
+├── pkg-plist                         # list of installed files
+└── files/
+    └── usr/local/
+        ├── bin/
+        │   ├── snidump
+        │   └── snidump_noether
+        ├── etc/rc.d/
+        │   └── snidump               # rc.d script (already written)
+        ├── pkg/
+        │   └── snidump.inc           # PHP: config read/write, service hooks
+        └── www/packages/snidump/
+            ├── snidump_settings.php  # web UI: configuration form
+            └── snidump_log.php       # web UI: status + log viewer
+```
+
+### Component breakdown and effort
+
+**1. FreeBSD pkg package (1–2 days)**
+
+A port-style Makefile that packages the existing binaries and rc.d script.
+Dependencies: `security/pcre2` (already installed on pfSense 2.8),
+`libpcap` (base system). The result is a `.pkg` file installable via
+`pkg add` or a custom repository.
+
+**2. config.xml integration (half a day)**
+
+pfSense stores all configuration in `/cf/conf/config.xml`. Package settings
+live under `<pfsense><installedpackages><snidump>`. A PHP include
+(`snidump.inc`) reads and writes this section using pfSense's `read_config()`
+/ `write_config()` API, then regenerates `/etc/rc.conf.local` and restarts
+the service when settings change.
+
+Example schema:
+```xml
+<snidump>
+  <config>
+    <interface>igb1.20</interface>
+    <bpf></bpf>
+    <flags>-q -j</flags>
+    <logfile>/var/log/snidump/hosts.jsonl</logfile>
+    <enable>on</enable>
+  </config>
+</snidump>
+```
+
+**3. Web UI — settings page (2–3 days)**
+
+`snidump_settings.php` using pfSense's PHP framework (`pfSense-gui`):
+
+- Interface dropdown (populated from pfSense's live interface list)
+- BPF filter text field with a "use default" checkbox
+- Flag toggles for `-q`, `-t`, `-j`
+- Count limit (`-c N`) numeric field
+- Log file path
+- Save / Apply buttons that write config.xml and restart the service
+
+The pfSense PHP framework is documented mainly by example — reading existing
+simple packages (`softflowd`, `darkstat`, `bandwidthd`) in the
+[pfSense-packages repository](https://github.com/pfsense/FreeBSD-ports) is the
+most efficient way to learn the patterns.
+
+**4. Web UI — status and log viewer (2–3 days)**
+
+`snidump_log.php`:
+
+- Service status indicator (running / stopped) with start/stop/restart buttons
+  hooked into pfSense's service registry so snidump also appears under
+  `Status > Services`
+- Last N lines of the JSON log rendered as a sortable HTML table
+  (time, proto, src, dst, host, port)
+- Auto-refresh toggle
+
+**5. Service registry integration (half a day)**
+
+A few lines in `snidump.inc` register snidump with pfSense's service framework,
+making it appear in `Status > Services` alongside other daemons.
+
+### Distribution options
+
+| Path | Effort | Result |
+|------|--------|--------|
+| Manual install (current) | Done | SSH-only, works today |
+| GitHub Releases `.pkg` | 1–2 days | `pkg add <url>`, no web UI |
+| Custom pkg repository | +1 day | Full pkg install/update/remove |
+| Full GUI package | 2–3 weeks total | Web UI config + log viewer |
+| Official pfSense Package Manager | Months + pfSense team review | In-box for all users |
+
+**Recommended incremental path:**
+
+1. Publish a signed `.pkg` on GitHub Releases built from the FreeBSD 15
+   port Makefile. Users install with:
+   ```sh
+   pkg add https://github.com/alvarow/snidump/releases/download/vX.Y/pfSense-pkg-snidump-X.Y.pkg
+   ```
+2. Add the PHP settings and log pages once the packaging is solid.
+3. Submit to the official pfSense package repo if community interest justifies
+   the ongoing maintenance commitment.
+
+### pfSense-specific constraints to keep in mind
+
+- **No compiler on pfSense** — binaries must be cross-compiled on a FreeBSD 15
+  build machine. The `builds/` directory in this repository is the right place
+  to keep pre-built binaries for each pfSense-supported architecture.
+- **`/etc/rc.conf` is a stub** — the package must write to `/etc/rc.conf.local`
+  or use pfSense's config.xml path; never write to `/etc/rc.conf` directly.
+- **`/etc/newsyslog.conf.d/`** — drop log rotation config here, not in the
+  main `newsyslog.conf`, which pfSense may overwrite on upgrades.
+- **Major upgrades** may overwrite `/usr/local` — the package should handle
+  post-upgrade reinstall gracefully; a pkg trigger or `after-upgrade` script
+  can automate this.
+- **Shell is `tcsh`** — any inline shell in PHP `exec()` calls or rc scripts
+  must be written for `sh`, not `tcsh`.
