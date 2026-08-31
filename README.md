@@ -18,20 +18,20 @@ Use: snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] -r trce.pcap  [-w dump.pca
   -c N  stop after N hostname matches
 ```
 
-**Dependencies:** `libpcap`, `libpcre`
+**Dependencies:** `libpcap`, `libpcre2`
 
 ## Quick start
 
 ```sh
 # Debian / Ubuntu
-sudo apt install libpcap-dev libpcre3-dev
+sudo apt install libpcap-dev libpcre2-dev
 make
 
 # FreeBSD / pfSense
-# libpcap is in the base system; only pcre needs to be installed from ports.
+# libpcap is in the base system; only pcre2 needs to be installed from ports.
 # The Makefile defaults to gcc; on FreeBSD (and pfSense, which is FreeBSD-based)
 # use clang and point it at the /usr/local prefix where ports install headers/libs.
-sudo pkg install pcre
+sudo pkg install pcre2
 make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 ```
 

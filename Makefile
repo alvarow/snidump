@@ -30,14 +30,14 @@ bin/snidump: src/*
 	mkdir -p bin && \
 	$(CC) $(CFLAGS) -D__DEBUG__=0 -Wall \
 		src/snidump.c src/tls.c src/http.c \
-		$(LDFLAGS) -lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre2-8 \
 		-o bin/snidump
 
 bin/snidump_dbg: src/*
 	mkdir -p bin && \
 	$(CC) $(CFLAGS) -D__DEBUG__=1 -Wall -ggdb \
 		src/snidump.c src/tls.c src/http.c \
-		$(LDFLAGS) -lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre2-8 \
 		-o bin/snidump_dbg
 
 bin/snidump_noether: src/*
@@ -45,7 +45,7 @@ bin/snidump_noether: src/*
 	$(CC) $(CFLAGS) -D__DEBUG__=0 -Wall \
 		-D__NO_ETHERNET__ \
 		src/snidump.c src/tls.c src/http.c \
-		$(LDFLAGS) -lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre2-8 \
 		-o bin/snidump_noether
 
 bin/snidump_noether_dbg: src/*
@@ -53,7 +53,7 @@ bin/snidump_noether_dbg: src/*
 	$(CC) $(CFLAGS) -D__DEBUG__=1 -Wall -ggdb \
 		-D__NO_ETHERNET__ \
 		src/snidump.c src/tls.c src/http.c \
-		$(LDFLAGS) -lpcap -lpcre \
+		$(LDFLAGS) -lpcap -lpcre2-8 \
 		-o bin/snidump_noether_dbg
 
 install: all

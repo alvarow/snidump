@@ -11,7 +11,6 @@
 #include <unistd.h>
 
 #include <pcap/pcap.h>
-#include <pcre.h>
 
 #if !__DEBUG__
 #define NDEBUG

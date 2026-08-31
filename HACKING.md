@@ -174,7 +174,7 @@ would use a self-pipe or `pcap_setnonblock` with a manual select loop.
 | `colors.h` | `istty_stdout`/`istty_stderr` defined in header → `extern` declarations; definitions moved to `snidump.c` |
 | `colors.h` | `CPRINT_STDERR`/`CPRINT_STDOUT` used `__VA_ARGS__` without `##`; no-arg calls failed to compile in debug builds |
 | `snidump.c` | `IPPROTO_TCP`/`IPPROTO_UDP` `#define` wrapped in `#ifndef` guards to avoid redefinition warnings |
-| `http.c` | `pcre_free()` on `pcre_extra` objects → `pcre_free_study()`; wrong deallocation function |
+| `http.c` | Migrated from PCRE1 (`libpcre`) to PCRE2 (`libpcre2-8`); PCRE1 is end-of-life and absent from modern FreeBSD/pfSense. `pcre2_match_data` objects are allocated once at init and reused per-packet to avoid heap allocation in the hot path |
 | `http.c` | Added length underflow guard before `headers_length` subtraction |
 | `tls.c` / `aux.h` | `read_bytes()` returned `size_t`; callers checked `<= 0` (unsigned comparison); return type changed to `int`, callers updated to `< 0` |
 | `tls.h` / `aux.h` | Function and variable definitions in headers → moved to `tls.c` as `static`; headers now contain only constants and macros |

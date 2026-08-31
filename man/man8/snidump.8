@@ -192,11 +192,11 @@ when capturing on non-standard ports or when UDP is required.
 depends on
 .Sy libpcap
 and
-.Sy libpcre .
+.Sy libpcre2 .
 .Pp
 On Debian / Ubuntu:
 .Bd -literal -offset indent
-sudo apt install libpcap-dev libpcre3-dev
+sudo apt install libpcap-dev libpcre2-dev
 make
 .Ed
 .Pp
@@ -204,7 +204,7 @@ On FreeBSD and pfSense
 .Pq which is FreeBSD-based ,
 .Sy libpcap
 is part of the base system.
-.Sy pcre
+.Sy pcre2
 must be installed from ports.
 The Makefile defaults to
 .Sy gcc ;
@@ -214,7 +214,7 @@ and supply the
 .Pa /usr/local
 prefix where ports install headers and libraries:
 .Bd -literal -offset indent
-sudo pkg install pcre
+sudo pkg install pcre2
 make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 .Ed
 .Sh BINARIES

@@ -21,15 +21,15 @@ Two variants are produced:
 | `snidump` | Standard build; expects Ethernet frames (DLT\_EN10MB). Handles both IPv4 and IPv6. |
 | `snidump_noether` | Compiled with `-D__NO_ETHERNET__`; skips the Ethernet header. Use on tunnel / raw-IP interfaces (e.g., `tun0`, `gif0`). Detects IPv4 vs IPv6 from the version nibble. |
 
-**Dependencies:** `libpcap`, `libpcre`
+**Dependencies:** `libpcap`, `libpcre2`
 
 ```sh
 # Debian / Ubuntu
-sudo apt install libpcap-dev libpcre3-dev
+sudo apt install libpcap-dev libpcre2-dev
 
-# FreeBSD
-sudo pkg install pcre
-# libpcap is in base on FreeBSD
+# FreeBSD / pfSense (libpcap is in base)
+sudo pkg install pcre2
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 ```
 
 ## Synopsis
