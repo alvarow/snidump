@@ -96,5 +96,19 @@ uninstall:
 	rm -f  $(MANDIR)/man8/snidump.8
 	rm -rf $(DOCDIR)
 
+# Build the pfSense .pkg. Requires a FreeBSD 15 amd64 build environment.
+# Binaries must already be in builds/amd64/freebsd-15/ before running this.
+pkg-build:
+	@test -f builds/amd64/freebsd-15/snidump || \
+	  { echo "[ERROR] builds/amd64/freebsd-15/snidump not found."; \
+	    echo "        Compile on a FreeBSD 15 amd64 machine first."; exit 1; }
+	cp builds/amd64/freebsd-15/snidump         pkg/files/usr/local/bin/snidump
+	cp builds/amd64/freebsd-15/snidump_noether pkg/files/usr/local/bin/snidump_noether
+	cp contrib/snidump.rc pkg/files/usr/local/etc/rc.d/snidump
+	chmod +x pkg/files/usr/local/etc/rc.d/snidump
+	cd pkg && make package
+	@echo ""
+	@echo "Package: pkg/work/pkg/pfSense-pkg-snidump-0.1.0.pkg"
+
 clean:
 	rm -rf bin
