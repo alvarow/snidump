@@ -1,4 +1,6 @@
-.PHONY: all debug clean install uninstall check-deps
+.PHONY: all debug clean install uninstall check-deps pkg-build
+
+VERSION := $(shell cat VERSION | tr -d '[:space:]')
 
 # Default goal — must be declared before check-deps so that bare 'make'
 # builds the binaries rather than stopping after the dependency check.
@@ -108,7 +110,7 @@ pkg-build:
 	chmod +x pkg/files/usr/local/etc/rc.d/snidump
 	cd pkg && make package
 	@echo ""
-	@echo "Package: pkg/work/pkg/pfSense-pkg-snidump-0.1.0.pkg"
+	@echo "Package: pkg/work/pkg/pfSense-pkg-snidump-$(VERSION).pkg"
 
 clean:
 	rm -rf bin
