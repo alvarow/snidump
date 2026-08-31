@@ -1,0 +1,13 @@
+Georgios Kontaxis <kontaxis@github>
+    Original author (2015). Designed and wrote the core TLS SNI and HTTP
+    Host header extraction engine, the pcap integration, and the dual
+    Ethernet/raw-IP binary architecture.
+
+Alvaro Reguly <alvarow@github>
+    Extended the codebase (2026): IPv6 support with extension header
+    walking, PCRE2 migration, JSON and timestamped output modes, -c/-q/-t
+    flags, Host header port stripping, pcap_datalink validation, assert
+    replacement with proper bounds checks, signal handling cleanup,
+    refactored global state into packet_ctx, HTTP method coverage
+    (HTTP/1.0, PATCH, WebDAV), man page, install target, systemd/rc.d/
+    logrotate service files, pfSense deployment documentation.

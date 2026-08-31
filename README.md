@@ -132,3 +132,13 @@ Add to `/etc/newsyslog.conf` for log rotation:
 ```
 /var/log/snidump/hosts.jsonl  snidump:snidump  640  30  *  @T00  CZ
 ```
+
+## Authors
+
+**Georgios Kontaxis** — original author (2015).
+Designed and wrote the core TLS SNI and HTTP Host header extraction engine,
+the pcap integration, and the dual Ethernet/raw-IP binary architecture.
+
+**Alvaro Reguly** — extended the codebase (2026).
+IPv6 support, PCRE2 migration, JSON/timestamp output, pfSense deployment,
+correctness fixes, man page, and service integration files.
