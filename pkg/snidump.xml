@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<packagegui>
+	<title>Diagnostics/snidump</title>
+	<name>snidump</name>
+	<version>0.1.0</version>
+	<include_file>/usr/local/pkg/snidump.inc</include_file>
+	<menu>
+		<name>snidump</name>
+		<tooltiptext>View snidump hostname log and service status</tooltiptext>
+		<section>Diagnostics</section>
+		<url>/snidump_log.php</url>
+	</menu>
+	<service>
+		<name>snidump</name>
+		<rcfile>snidump</rcfile>
+		<executable>snidump</executable>
+		<description>TLS SNI / HTTP Host extractor</description>
+	</service>
+	<tabs>
+		<tab>
+			<text>Settings</text>
+			<url>/pkg_edit.php?xml=snidump.xml&amp;id=0</url>
+			<active/>
+		</tab>
+		<tab>
+			<text>Log Viewer</text>
+			<url>/snidump_log.php</url>
+		</tab>
+	</tabs>
+	<fields>
+		<field>
+			<name>Service</name>
+			<type>listtopic</type>
+		</field>
+		<field>
+			<fielddescr>Enable</fielddescr>
+			<fieldname>enable</fieldname>
+			<type>checkbox</type>
+			<description>Start snidump at boot and apply settings</description>
+		</field>
+		<field>
+			<name>Capture</name>
+			<type>listtopic</type>
+		</field>
+		<field>
+			<fielddescr>Interface</fielddescr>
+			<fieldname>interface</fieldname>
+			<type>interfaces_selection</type>
+			<hideinterfaceregex>loopback</hideinterfaceregex>
+			<description>Network interface to capture on</description>
+			<required/>
+		</field>
+		<field>
+			<fielddescr>Interface Type</fielddescr>
+			<fieldname>interface_type</fieldname>
+			<type>select</type>
+			<options>
+				<option><name>Ethernet / Wi-Fi (use snidump)</name><value>ethernet</value></option>
+				<option><name>TUN / VPN / Tunnel (use snidump_noether)</name><value>tunnel</value></option>
+			</options>
+			<default_value>ethernet</default_value>
+			<description><![CDATA[Ethernet/Wi-Fi interfaces have a 14-byte link-layer header;
+				TUN/VPN/tunnel interfaces (tun0, gif0, gre0) deliver raw IP frames with no header.
+				Choose <em>TUN / VPN / Tunnel</em> for WireGuard, OpenVPN TUN, or FreeBSD gif/gre interfaces.]]>
+			</description>
+		</field>
+		<field>
+			<fielddescr>BPF Filter</fielddescr>
+			<fieldname>bpf</fieldname>
+			<type>input</type>
+			<size>60</size>
+			<description><![CDATA[Custom BPF capture filter. Leave empty to use the built-in default:
+				<code>(ip or ip6) and tcp and (tcp[tcpflags] &amp; tcp-push == tcp-push) and (dst port 80 or dst port 443)</code>]]>
+			</description>
+		</field>
+		<field>
+			<name>Output</name>
+			<type>listtopic</type>
+		</field>
+		<field>
+			<fielddescr>Quiet mode (-q)</fielddescr>
+			<fieldname>quiet</fieldname>
+			<type>checkbox</type>
+			<description>Suppress informational startup lines</description>
+		</field>
+		<field>
+			<fielddescr>JSON output (-j)</fielddescr>
+			<fieldname>json</fieldname>
+			<type>checkbox</type>
+			<description>Output one JSON object per matched hostname (includes timestamp)</description>
+		</field>
+		<field>
+			<fielddescr>Timestamps (-t)</fielddescr>
+			<fieldname>timestamp</fieldname>
+			<type>checkbox</type>
+			<description>Prefix each hostname line with a UTC timestamp (ignored when JSON is enabled)</description>
+		</field>
+		<field>
+			<fielddescr>Stop after N matches (-c)</fielddescr>
+			<fieldname>count</fieldname>
+			<type>input</type>
+			<size>8</size>
+			<description>Stop capturing after this many hostname matches. Leave empty for unlimited.</description>
+		</field>
+		<field>
+			<name>Logging</name>
+			<type>listtopic</type>
+		</field>
+		<field>
+			<fielddescr>Log file path</fielddescr>
+			<fieldname>logfile</fieldname>
+			<type>input</type>
+			<size>60</size>
+			<default_value>/var/log/snidump/hosts.jsonl</default_value>
+			<description>Absolute path to the output log file</description>
+		</field>
+		<field>
+			<fielddescr>Keep N rotated files</fielddescr>
+			<fieldname>log_rotate_count</fieldname>
+			<type>input</type>
+			<size>8</size>
+			<default_value>30</default_value>
+			<description>Number of rotated log files to retain</description>
+		</field>
+		<field>
+			<fielddescr>Rotate</fielddescr>
+			<fieldname>log_rotate_when</fieldname>
+			<type>select</type>
+			<options>
+				<option><name>Daily (midnight)</name><value>daily</value></option>
+				<option><name>Weekly (Sunday midnight)</name><value>weekly</value></option>
+				<option><name>By size — enter KB below</name><value>bysize</value></option>
+			</options>
+			<default_value>daily</default_value>
+			<description>When to rotate the log file</description>
+		</field>
+		<field>
+			<fielddescr>Size limit (KB)</fielddescr>
+			<fieldname>log_rotate_size_kb</fieldname>
+			<type>input</type>
+			<size>8</size>
+			<description>Maximum log file size in KB before rotation. Only used when "By size" is selected above.</description>
+		</field>
+	</fields>
+	<custom_php_validation_command>validate_form_snidump($_POST, $input_errors);</custom_php_validation_command>
+	<custom_php_resync_config_command>sync_package_snidump();</custom_php_resync_config_command>
+	<custom_php_install_command>snidump_install();</custom_php_install_command>
+	<custom_php_deinstall_command>snidump_deinstall();</custom_php_deinstall_command>
+</packagegui>
