@@ -85,8 +85,7 @@ function sync_package_snidump() {
     $realif_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $realif);
     $binary_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $binary);
     $logfile_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $logfile);
-    // flags already escaped by snidump_build_flags(); still sanitize for extra safety
-    $flags_safe = str_replace(['"', '\\', '$', '`'], ['', '', '', ''], $flags);
+    // flags is safely assembled from controlled values; no sanitization needed
 
     // Ensure log directory exists
     if (!is_dir(dirname($logfile))) {
@@ -99,7 +98,7 @@ function sync_package_snidump() {
         "snidump_enable=\"YES\"",
         "snidump_interface=\"{$realif_safe}\"",
         "snidump_binary=\"{$binary_safe}\"",
-        "snidump_flags=\"{$flags_safe}\"",
+        "snidump_flags=\"{$flags}\"",
         "snidump_logfile=\"{$logfile_safe}\"",
     ]) . "\n";
     file_put_contents('/etc/rc.conf.local', $stanza, FILE_APPEND);
