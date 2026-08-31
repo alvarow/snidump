@@ -40,6 +40,7 @@ load_rc_config "${name}"
 : ${snidump_enable:="NO"}
 : ${snidump_interface:="em0"}
 : ${snidump_flags:="-q -j"}
+: ${snidump_bpf:=""}
 : ${snidump_logfile:="/var/log/snidump/hosts.jsonl"}
 : ${snidump_pidfile:="/var/run/${name}.pid"}
 : ${snidump_binary:="snidump"}
@@ -49,17 +50,18 @@ pidfile="${snidump_pidfile}"
 # daemon(8) wraps the process: handles daemonization, PID file, and
 # automatic restart (-r) on unexpected exit.
 command="/usr/sbin/daemon"
+_bpf_arg=""
+[ -n "${snidump_bpf}" ] && _bpf_arg="-f \"${snidump_bpf}\""
 command_args="-p ${snidump_pidfile} -r \
     -o ${snidump_logfile} \
-    /usr/local/bin/${snidump_binary} ${snidump_flags} -i ${snidump_interface}"
+    /usr/local/bin/${snidump_binary} ${snidump_flags} ${_bpf_arg} -i ${snidump_interface}"
 
 start_precmd="snidump_precmd"
 
 snidump_precmd()
 {
     if [ ! -d "$(dirname ${snidump_logfile})" ]; then
-        install -d -o snidump -g snidump -m 750 \
-            "$(dirname ${snidump_logfile})"
+        install -d -o root -g wheel -m 750 "$(dirname ${snidump_logfile})"
     fi
 }
 

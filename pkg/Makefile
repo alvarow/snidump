@@ -17,8 +17,10 @@ do-install:
 		${STAGEDIR}${PREFIX}/bin/snidump
 	${INSTALL_PROGRAM} ${WRKSRC}/../files/usr/local/bin/snidump_noether \
 		${STAGEDIR}${PREFIX}/bin/snidump_noether
+	${INSTALL_DIR} ${STAGEDIR}${PREFIX}/etc/rc.d
 	${INSTALL_SCRIPT} ${WRKSRC}/../files/usr/local/etc/rc.d/snidump \
 		${STAGEDIR}${PREFIX}/etc/rc.d/snidump
+	${INSTALL_DIR} ${STAGEDIR}${PREFIX}/etc/newsyslog.conf.d
 	${INSTALL_DATA} ${WRKSRC}/../files/usr/local/etc/newsyslog.conf.d/snidump \
 		${STAGEDIR}${PREFIX}/etc/newsyslog.conf.d/snidump
 	${INSTALL_DIR} ${STAGEDIR}${PREFIX}/pkg

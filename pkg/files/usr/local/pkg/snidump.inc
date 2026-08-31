@@ -40,11 +40,6 @@ function snidump_build_flags($cfg) {
     if (!empty($cfg['count']) && intval($cfg['count']) > 0) {
         $flags .= ' -c ' . intval($cfg['count']);
     }
-    if (!empty($cfg['bpf'])) {
-        // BPF filter is validated before save; escape for double-quoted context
-        $bpf_escaped = str_replace(['\\', '"', '$', '`'], ['\\\\', '\\"', '\\$', '\\`'], trim($cfg['bpf']));
-        $flags .= ' -f "' . $bpf_escaped . '"';
-    }
     return ltrim($flags);
 }
 
@@ -86,6 +81,8 @@ function sync_package_snidump() {
     $binary_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $binary);
     $logfile_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $logfile);
     // flags is safely assembled from controlled values; no sanitization needed
+    // BPF filter is handled via a separate rc variable to avoid word-splitting
+    $bpf_raw = str_replace(['\\', '"', '$', '`'], ['\\\\', '\\"', '\\$', '\\`'], trim($cfg['bpf'] ?? ''));
 
     // Ensure log directory exists
     if (!is_dir(dirname($logfile))) {
@@ -100,6 +97,7 @@ function sync_package_snidump() {
         "snidump_binary=\"{$binary_safe}\"",
         "snidump_flags=\"{$flags}\"",
         "snidump_logfile=\"{$logfile_safe}\"",
+        "snidump_bpf=\"{$bpf_raw}\"",
     ]) . "\n";
     file_put_contents('/etc/rc.conf.local', $stanza, FILE_APPEND);
 
