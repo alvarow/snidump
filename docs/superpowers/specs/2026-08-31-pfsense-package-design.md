@@ -1,0 +1,228 @@
+# snidump pfSense Package — Design Spec
+
+**Date:** 2026-08-31  
+**Branch:** feature/pfsense-package  
+**Scope:** Full pfSense package: FreeBSD pkg structure + PHP web UI (settings + log viewer)  
+**Architecture target:** amd64 (FreeBSD 15, pfSense CE 2.8.x / pfSense Plus 24.x)
+
+---
+
+## 1. Goals
+
+1. Make snidump installable on pfSense via `pkg add <url>` without SSH/manual steps.
+2. Provide a pfSense web UI for configuration and log viewing.
+3. Produce a port structure compatible with eventual submission to the official pfSense Package Manager.
+
+## 2. Non-goals
+
+- arm64 or mips32 support (deferred).
+- QUIC/HTTP3 or TCP reassembly (separate TODO items).
+- Submission to the official pfSense Package Manager (this branch just makes the structure compatible).
+
+---
+
+## 3. Repository layout
+
+New tree under `pkg/` at the repo root; existing `contrib/` is unchanged.
+
+```
+pkg/
+├── Makefile                        # FreeBSD port Makefile (NO_BUILD, NO_FETCH)
+├── pkg-descr                       # one-paragraph description for `pkg info`
+├── pkg-plist                       # every installed file, one per line
+└── files/
+    └── usr/local/
+        ├── bin/
+        │   ├── snidump             # pre-built amd64 FreeBSD 15 binary
+        │   └── snidump_noether
+        ├── etc/rc.d/
+        │   └── snidump             # copy of contrib/snidump.rc (with binary var support)
+        ├── etc/newsyslog.conf.d/
+        │   └── snidump             # log rotation (survives pfSense upgrades)
+        ├── pkg/
+        │   └── snidump.inc         # PHP: config read/write, service hooks, menu registration
+        └── www/packages/snidump/
+            ├── snidump_settings.php
+            └── snidump_log.php
+
+builds/
+└── amd64/
+    └── freebsd-15/                 # new; pfSense CE 2.8.x / Plus 24.x target
+        ├── snidump
+        └── snidump_noether
+```
+
+The Makefile gets a new `pkg-build` target that stages `builds/amd64/freebsd-15/` binaries into `pkg/files/usr/local/bin/` and runs `make package` to produce the `.pkg`.
+
+---
+
+## 4. pkg/Makefile
+
+- `NO_BUILD=yes`, `NO_FETCH=yes` — binaries are in-tree, no source fetch or compile step.
+- `RUN_DEPENDS`: `security/pcre2` (libpcap is in FreeBSD base).
+- `post-install` target: creates `/var/log/snidump/` with mode 750, owned by `root:wheel` (pfSense has no dedicated snidump user; the service runs as root with `pcap_open_live` requiring privilege).
+- Version macro `PORTVERSION` tracks the snidump release tag.
+
+---
+
+## 5. rc.d script changes
+
+`contrib/snidump.rc` gains one variable:
+
+```sh
+: ${snidump_binary:="snidump"}      # or snidump_noether for TUN/VPN interfaces
+```
+
+`command_args` changes from hardcoded `/usr/local/bin/snidump` to `/usr/local/bin/${snidump_binary}`.
+
+The copy in `pkg/files/usr/local/etc/rc.d/snidump` is kept in sync with `contrib/snidump.rc`; both are updated together.
+
+---
+
+## 6. config.xml schema
+
+Settings live under `<pfsense><installedpackages><snidump><config>`:
+
+```xml
+<snidump>
+  <config>
+    <enable>on</enable>
+    <interface>igb0</interface>
+    <interface_type>ethernet</interface_type>   <!-- ethernet | tunnel -->
+    <bpf></bpf>                                 <!-- empty = use compiled-in default -->
+    <quiet>on</quiet>
+    <json>on</json>
+    <timestamp></timestamp>                     <!-- ignored when json=on -->
+    <count></count>                             <!-- empty = unlimited -->
+    <logfile>/var/log/snidump/hosts.jsonl</logfile>
+  </config>
+</snidump>
+```
+
+`interface_type` drives binary selection: `ethernet` → `snidump`, `tunnel` → `snidump_noether`.
+
+---
+
+## 7. snidump.inc
+
+PHP file at `/usr/local/pkg/snidump.inc`. Responsibilities:
+
+**Service hooks** (called by pfSense package framework automatically):
+
+| Function | When called | Action |
+|----------|-------------|--------|
+| `snidump_install()` | Post-install | Create log dir, set permissions |
+| `snidump_deinstall()` | Pre-deinstall | Stop service, remove rc.conf.local entries |
+| `snidump_resync()` | Save/Apply | Write rc.conf.local stanza, restart service |
+
+**rc.conf.local stanza** written by `snidump_resync()`:
+
+```sh
+snidump_enable="YES"
+snidump_interface="igb0"
+snidump_binary="snidump"
+snidump_flags="-q -j"
+snidump_logfile="/var/log/snidump/hosts.jsonl"
+```
+
+**Service registry** — `get_services()` contribution registers snidump in `Status > Services`.
+
+**Menu registration** — adds `Diagnostics > snidump` pointing to `snidump_log.php`.
+
+---
+
+## 8. Settings page (`snidump_settings.php`)
+
+Standard pfSense `$pconfig` / `$input_errors` pattern.
+
+**Form fields:**
+
+| Field | Control | config.xml key |
+|-------|---------|----------------|
+| Enable snidump | Checkbox | `enable` |
+| Interface | Dropdown — `get_configured_interface_list()` (all: VLANs, bridges, tunnels) | `interface` |
+| Interface type | Radio: Ethernet/Wi-Fi · TUN/VPN/Tunnel | `interface_type` |
+| BPF filter | Text | `bpf` |
+| Quiet (`-q`) | Checkbox | `quiet` |
+| JSON output (`-j`) | Checkbox | `json` |
+| Timestamp (`-t`) | Checkbox (disabled when JSON on) | `timestamp` |
+| Stop after N matches | Number | `count` |
+| Log file path | Text | `logfile` |
+
+**Validation:**
+
+- Interface must be selected.
+- BPF field, if non-empty, is validated via `exec("tcpdump -d '<filter>' 2>&1", ...)` dry-run.
+- Count must be a positive integer if non-empty.
+- Log file path must start with `/`.
+
+**Save flow:** validate → `write_config()` → `snidump_resync()` → display success banner.
+
+---
+
+## 9. Log/status viewer (`snidump_log.php`)
+
+**Status panel:**
+
+- Service state badge (Running / Stopped) via `get_service_status()`.
+- Start / Stop / Restart buttons via `service_control_*()`.
+- PID (from `/var/run/snidump.pid`) and active interface/binary (from rc.conf.local).
+
+**Log table:**
+
+- Reads last N lines of the JSONL log (N selectable: 50 / 200 / 500; default 200).
+- Parses each line as JSON; renders columns: Time · Proto · Src · Dst · Host.
+- Falls back to raw text display if JSON output is disabled in settings.
+- Auto-refresh via `<meta http-equiv="refresh" content="10">` when toggle is on.
+- "Clear log" button truncates the log file (JavaScript confirm dialog).
+- Shows "No log data — service has not run yet" if the log file is absent.
+
+**Menu location:** `Diagnostics > snidump`.
+
+---
+
+## 10. Build and distribution workflow
+
+**Build prerequisites:** FreeBSD 15 amd64 machine (or jail/Docker) with `cc`, `libpcap-dev`, `pcre2`.
+
+**Step 1 — compile binaries:**
+```sh
+# On FreeBSD 15 amd64
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+cp bin/snidump bin/snidump_noether builds/amd64/freebsd-15/
+```
+
+**Step 2 — stage and package:**
+```sh
+make pkg-build      # copies binaries into pkg/files/usr/local/bin/, runs `make package`
+# Output: pkg/work/pkg/pfSense-pkg-snidump-X.Y.pkg
+```
+
+**Step 3 — GitHub Release:**
+
+Upload `.pkg` as a release asset. Installation on pfSense:
+```sh
+pkg add https://github.com/<user>/snidump/releases/download/vX.Y/pfSense-pkg-snidump-X.Y.pkg
+```
+
+**Upgrade path:** The port structure is compatible with `pfSense/FreeBSD-ports`. Upstream submission is out of scope for this branch.
+
+---
+
+## 11. Implementation approach (two PRs)
+
+**PR 1 — pkg infrastructure:**
+- `pkg/Makefile`, `pkg-descr`, `pkg-plist`
+- `builds/amd64/freebsd-15/` binaries
+- Updated `contrib/snidump.rc` (binary variable)
+- `pkg/files/usr/local/etc/rc.d/snidump`
+- `pkg/files/usr/local/etc/newsyslog.conf.d/snidump`
+- Makefile `pkg-build` target
+
+**PR 2 — PHP web UI:**
+- `pkg/files/usr/local/pkg/snidump.inc`
+- `pkg/files/usr/local/www/packages/snidump/snidump_settings.php`
+- `pkg/files/usr/local/www/packages/snidump/snidump_log.php`
+- Updated `pkg-plist` to include PHP files
+
+Both PRs land on `feature/pfsense-package`.
