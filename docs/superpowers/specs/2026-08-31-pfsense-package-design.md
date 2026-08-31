@@ -28,6 +28,7 @@ New tree under `pkg/` at the repo root; existing `contrib/` is unchanged.
 
 ```
 pkg/
+├── snidump.xml                     # pfSense package GUI definition (settings form, menu, service)
 ├── Makefile                        # FreeBSD port Makefile (NO_BUILD, NO_FETCH)
 ├── pkg-descr                       # one-paragraph description for `pkg info`
 ├── pkg-plist                       # every installed file, one per line
@@ -41,10 +42,14 @@ pkg/
         ├── etc/newsyslog.conf.d/
         │   └── snidump             # log rotation (survives pfSense upgrades)
         ├── pkg/
-        │   └── snidump.inc         # PHP: config read/write, service hooks, menu registration
-        └── www/packages/snidump/
-            ├── snidump_settings.php
-            └── snidump_log.php
+        │   └── snidump.inc         # PHP: config read/write, service hooks, validation
+        └── www/
+            └── snidump_log.php     # custom log/status viewer (pfSense Bootstrap style)
+
+pfSense package settings pages are XML-driven: `snidump.xml` defines the form fields and
+pfSense's built-in `pkg_edit.php` renders them. Custom PHP pages are only needed for
+non-standard views (the log viewer). Menu entries, service registration (`Status > Services`),
+and install/deinstall hooks are declared in the XML.
 
 builds/
 └── amd64/
@@ -139,42 +144,42 @@ snidump_flags="-q -j"
 snidump_logfile="/var/log/snidump/hosts.jsonl"
 ```
 
-**Service registry** — `get_services()` contribution registers snidump in `Status > Services`.
-
-**Menu registration** — adds `Diagnostics > snidump` pointing to `snidump_log.php`.
+Service registration (`Status > Services`) and menu registration (`Diagnostics > snidump`) are declared in `snidump.xml`, not in PHP code.
 
 ---
 
-## 8. Settings page (`snidump_settings.php`)
+## 8. Settings page (`snidump.xml` + pfSense `pkg_edit.php`)
 
-Standard pfSense `$pconfig` / `$input_errors` pattern.
+pfSense settings forms are XML-driven. `snidump.xml` declares the fields; pfSense's
+`pkg_edit.php` renders the form, saves values to `config.xml`, and calls the hooks
+defined in `snidump.inc`. No custom settings PHP file is needed.
 
-**Form fields:**
+**Form fields declared in XML:**
 
-| Field | Control | config.xml key |
-|-------|---------|----------------|
-| Enable snidump | Checkbox | `enable` |
-| Interface | Dropdown — `get_configured_interface_list()` (all: VLANs, bridges, tunnels) | `interface` |
-| Interface type | Radio: Ethernet/Wi-Fi · TUN/VPN/Tunnel | `interface_type` |
-| BPF filter | Text | `bpf` |
-| Quiet (`-q`) | Checkbox | `quiet` |
-| JSON output (`-j`) | Checkbox | `json` |
-| Timestamp (`-t`) | Checkbox (disabled when JSON on) | `timestamp` |
-| Stop after N matches | Number | `count` |
-| Log file path | Text | `logfile` |
-| Keep N rotated files | Number (default 30) | `log_rotate_count` |
-| Rotate | Radio: Daily · Weekly · By size (KB) | `log_rotate_when` |
+| Field | XML type | config.xml key |
+|-------|----------|----------------|
+| Enable snidump | `checkbox` | `enable` |
+| Interface | `interfaces_selection` (all interfaces) | `interface` |
+| Interface type | `select` (Ethernet/Wi-Fi · TUN/VPN/Tunnel) | `interface_type` |
+| BPF filter | `input` | `bpf` |
+| Quiet (`-q`) | `checkbox` | `quiet` |
+| JSON output (`-j`) | `checkbox` | `json` |
+| Timestamp (`-t`) | `checkbox` | `timestamp` |
+| Stop after N matches | `input` | `count` |
+| Log file path | `input` | `logfile` |
+| Keep N rotated files | `input` | `log_rotate_count` |
+| Rotate | `select` (Daily · Weekly · By size KB) | `log_rotate_when` |
 
-**Validation:**
+**Validation** (in `validate_form_snidump()` called via XML hook):
 
 - Interface must be selected.
-- BPF field, if non-empty, is validated via `exec("tcpdump -d '<filter>' 2>&1", ...)` dry-run.
+- BPF field, if non-empty, validated by writing to a temp file and running `tcpdump -d -F <tmpfile> -r /dev/null 2>&1`.
 - Count must be a positive integer if non-empty.
 - Log file path must start with `/`.
 - `log_rotate_count` must be a positive integer.
-- `log_rotate_when`: if "By size", the size field must be a positive integer (KB).
+- `log_rotate_when`: if numeric (size mode), must be a positive integer.
 
-**Save flow:** validate → `write_config()` → `snidump_resync()` → display success banner.
+**Save flow:** pfSense calls `validate_form_snidump()` → on pass, saves to `config.xml` → calls `snidump_resync()` → displays success banner.
 
 ---
 
@@ -195,7 +200,7 @@ Standard pfSense `$pconfig` / `$input_errors` pattern.
 - "Clear log" button truncates the log file (JavaScript confirm dialog).
 - Shows "No log data — service has not run yet" if the log file is absent.
 
-**Menu location:** `Diagnostics > snidump`.
+**Page location:** `/usr/local/www/snidump_log.php`. Menu entry (`Diagnostics > snidump`) declared in `snidump.xml`.
 
 ---
 
@@ -238,9 +243,9 @@ pkg add https://github.com/<user>/snidump/releases/download/vX.Y/pfSense-pkg-sni
 - Makefile `pkg-build` target
 
 **PR 2 — PHP web UI:**
+- `pkg/snidump.xml` (settings form, menu, service registration, hooks)
 - `pkg/files/usr/local/pkg/snidump.inc`
-- `pkg/files/usr/local/www/packages/snidump/snidump_settings.php`
-- `pkg/files/usr/local/www/packages/snidump/snidump_log.php`
-- Updated `pkg-plist` to include PHP files
+- `pkg/files/usr/local/www/snidump_log.php`
+- Updated `pkg-plist` to include XML and PHP files
 
 Both PRs land on `feature/pfsense-package`.
