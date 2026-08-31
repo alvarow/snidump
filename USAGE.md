@@ -35,8 +35,8 @@ sudo pkg install pcre
 ## Synopsis
 
 ```
-snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -i interface [-w dump.pcap]
-snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -r trace.pcap  [-w dump.pcap]
+snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] -i interface [-w dump.pcap]
+snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] [-c N] -r trace.pcap  [-w dump.pcap]
 ```
 
 | Flag | Argument | Description |
@@ -49,6 +49,7 @@ snidump [-h] [-f bpf] [-p] [-q] [-t] [-j] -r trace.pcap  [-w dump.pcap]
 | `-q` | — | Quiet: suppress all informational output; only hostnames go to stdout |
 | `-t` | — | Prefix each hostname line with a UTC timestamp |
 | `-j` | — | JSON output — one object per line, includes timestamp (implies `-t` format) |
+| `-c` | N | Stop after N hostname matches |
 | `-h` | — | Print usage and exit |
 
 Exactly one of `-i` or `-r` is required. `-i` and `-r` cannot be combined.
@@ -73,7 +74,7 @@ IPv6 example (addresses are bracketed to delimit them from the port):
 
 The destination port appears in square brackets. For TLS the length prefix is
 the byte-length of the SNI value; for HTTP it is the byte-length of the Host
-header value.
+header value (after stripping any explicit port).
 
 Informational messages and statistics go to stderr. Hostnames always go to
 stdout, making it straightforward to redirect or pipe them independently.
@@ -89,11 +90,14 @@ stdout, making it straightforward to redirect or pipe them independently.
 ```json
 {"time":"2026-08-27T14:23:01Z","proto":"TLS","src":"192.168.1.10:52001","dst":"140.82.121.4:443","host":"www.github.com"}
 {"time":"2026-08-27T14:23:02Z","proto":"HTTP","src":"192.168.1.10:52100","dst":"93.184.216.34:80","host":"example.com"}
-{"time":"2026-08-27T14:23:03Z","proto":"TLS","src":"[2001:db8::1]:52200","dst":"[2001:4860:4860::8888]:443","host":"www.google.com"}
+{"time":"2026-08-27T14:23:03Z","proto":"HTTP","src":"192.168.1.10:52200","dst":"93.184.216.34:8080","host":"example.com","port":8080}
+{"time":"2026-08-27T14:23:04Z","proto":"TLS","src":"[2001:db8::1]:52300","dst":"[2001:4860:4860::8888]:443","host":"www.google.com"}
 ```
 
 Fields: `time` (UTC ISO 8601), `proto` (`TLS` or `HTTP`), `src`, `dst`
-(`address:port`; IPv6 addresses are bracketed), `host`.
+(`address:port`; IPv6 addresses are bracketed), `host`, `port` (optional —
+present only when an HTTP `Host` header carries an explicit port number, e.g.
+`Host: example.com:8080`).
 
 ## Default BPF filter
 

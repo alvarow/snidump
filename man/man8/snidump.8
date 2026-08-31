@@ -8,11 +8,13 @@
 .Nm
 .Op Fl hpqtj
 .Op Fl f Ar bpf
+.Op Fl c Ar N
 .Fl i Ar interface
 .Op Fl w Ar dump.pcap
 .Nm
 .Op Fl hpqtj
 .Op Fl f Ar bpf
+.Op Fl c Ar N
 .Fl r Ar trace.pcap
 .Op Fl w Ar dump.pcap
 .Sh DESCRIPTION
@@ -84,7 +86,19 @@ Emit one JSON object per line instead of plain text
 .Pq NDJSON / JSON\ Lines format .
 Each object includes the timestamp, protocol, source endpoint, destination
 endpoint, and hostname.
+When an HTTP
+.Em Host
+header carries an explicit port
+.Pq e.g.\& Sy Host:\ example.com:8080 ,
+a
+.Sy port
+field is added to the JSON object.
 This flag implies timestamped output.
+.It Fl c Ar N
+Stop after
+.Ar N
+hostname matches and exit cleanly.
+Useful for one-shot scripting or quick tests.
 .It Fl h
 Print a usage summary to stderr and exit.
 .El
@@ -106,7 +120,7 @@ IPv6 addresses are enclosed in brackets to delimit them from the port:
 .Pp
 The destination port appears in square brackets.
 The length prefix is the byte-length of the SNI value (for TLS) or the
-Host header value (for HTTP).
+Host header value (for HTTP), measured after stripping any explicit port.
 .Pp
 Informational messages and error diagnostics are written to stderr.
 Hostname events are always written to stdout.
@@ -119,6 +133,9 @@ Hostname events are always written to stdout.
 {"time":"2026-08-27T14:23:01Z","proto":"TLS",
  "src":"192.168.1.10:52001","dst":"140.82.121.4:443",
  "host":"www.github.com"}
+{"time":"2026-08-27T14:23:02Z","proto":"HTTP",
+ "src":"192.168.1.10:52200","dst":"93.184.216.34:8080",
+ "host":"example.com","port":8080}
 .Ed
 .Pp
 Fields:
@@ -136,6 +153,18 @@ form.
 IPv6 addresses are bracketed.
 .It Sy host
 The extracted hostname.
+Any
+.Sq :port
+suffix present in an HTTP
+.Em Host
+header is stripped from this field.
+.It Sy port
+.Em Optional.
+Present only when an HTTP
+.Em Host
+header contains an explicit port number
+.Pq e.g.\& Sy Host:\ example.com:8080 .
+Never present for TLS SNI entries.
 .El
 .Sh DEFAULT BPF FILTER
 .Bd -literal -offset indent
