@@ -41,8 +41,9 @@ function snidump_build_flags($cfg) {
         $flags .= ' -c ' . intval($cfg['count']);
     }
     if (!empty($cfg['bpf'])) {
-        // BPF filter is validated before save; pass it via -f flag
-        $flags .= ' -f ' . escapeshellarg(trim($cfg['bpf']));
+        // BPF filter is validated before save; escape for double-quoted context
+        $bpf_escaped = str_replace(['\\', '"', '$', '`'], ['\\\\', '\\"', '\\$', '\\`'], trim($cfg['bpf']));
+        $flags .= ' -f "' . $bpf_escaped . '"';
     }
     return ltrim($flags);
 }
@@ -80,6 +81,13 @@ function sync_package_snidump() {
     $logfile = $cfg['logfile'] ?: '/var/log/snidump/hosts.jsonl';
     $flags   = snidump_build_flags($cfg);
 
+    // Sanitize values for shell safety before interpolating into rc.conf.local
+    $realif_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $realif);
+    $binary_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $binary);
+    $logfile_safe = preg_replace('/[^a-zA-Z0-9\/_.\\-]/', '', $logfile);
+    // flags already escaped by snidump_build_flags(); still sanitize for extra safety
+    $flags_safe = str_replace(['"', '\\', '$', '`'], ['', '', '', ''], $flags);
+
     // Ensure log directory exists
     if (!is_dir(dirname($logfile))) {
         mkdir(dirname($logfile), 0750, true);
@@ -89,10 +97,10 @@ function sync_package_snidump() {
     snidump_remove_rcconf_lines();
     $stanza = implode("\n", [
         "snidump_enable=\"YES\"",
-        "snidump_interface=\"{$realif}\"",
-        "snidump_binary=\"{$binary}\"",
-        "snidump_flags=\"{$flags}\"",
-        "snidump_logfile=\"{$logfile}\"",
+        "snidump_interface=\"{$realif_safe}\"",
+        "snidump_binary=\"{$binary_safe}\"",
+        "snidump_flags=\"{$flags_safe}\"",
+        "snidump_logfile=\"{$logfile_safe}\"",
     ]) . "\n";
     file_put_contents('/etc/rc.conf.local', $stanza, FILE_APPEND);
 
