@@ -6,7 +6,10 @@
 #   cp snidump.rc /usr/local/etc/rc.d/snidump
 #   chmod +x /usr/local/etc/rc.d/snidump
 #
-# /etc/rc.conf variables:
+# Configuration variables — set in /etc/rc.conf or /etc/rc.conf.local.
+# On pfSense, /etc/rc.conf is managed by the system and must not be
+# edited directly; use /etc/rc.conf.local instead.
+#
 #   snidump_enable="YES"           # required to start at boot
 #   snidump_interface="em0"        # network interface to capture on
 #   snidump_flags="-q -j"          # extra flags passed to snidump
@@ -16,8 +19,12 @@
 # Usage:
 #   service snidump start|stop|restart|status
 #
-# Log rotation — add to /etc/newsyslog.conf:
-#   /var/log/snidump/hosts.jsonl  snidump:snidump  640  30  *  @T00  CZ
+# Log rotation:
+#   Standard FreeBSD — add to /etc/newsyslog.conf:
+#     /var/log/snidump/hosts.jsonl  snidump:snidump  640  30  *  @T00  CZ
+#   pfSense — drop a file in /etc/newsyslog.conf.d/ instead
+#   (survives pfSense upgrades unlike the main newsyslog.conf):
+#     /var/log/snidump/hosts.jsonl  root:wheel  640  30  *  @T00  CZ
 
 # PROVIDE: snidump
 # REQUIRE: NETWORK

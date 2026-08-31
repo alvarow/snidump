@@ -246,7 +246,35 @@ sudo ./bin/snidump -i eth0 | tee hosts.log
 Because informational messages go to stderr and hostnames go to stdout, this
 captures only hostnames in `hosts.log`.
 
-### 13 — Offline analysis pipeline: extract unique hostnames, sorted
+### 13 — Stop after N matches
+
+Useful for quick checks or one-shot scripts:
+
+```sh
+# Print the first 10 hostnames seen on the wire, then exit
+sudo ./bin/snidump -c 10 -i eth0
+
+# Extract exactly one TLS hostname from a PCAP file as JSON
+./bin/snidump -qjc 1 -r capture.pcap
+```
+
+### 14 — Filter by source subnet (e.g. a specific VLAN)
+
+To watch only traffic originating from a particular subnet, add a `src net`
+clause to the BPF filter.  Run on the VLAN interface directly to avoid seeing
+other VLANs, or on the parent interface with an explicit subnet filter:
+
+```sh
+# Capture VLAN20 (192.168.20.0/24) traffic on its dedicated interface
+sudo ./bin/snidump -i igb1.20
+
+# Or on the parent interface, filtering by source subnet
+sudo ./bin/snidump -i igb1 \
+  -f '(ip or ip6) and tcp and (tcp[tcpflags] & tcp-push == tcp-push) \
+      and (dst port 80 or dst port 443) and src net 192.168.20.0/24'
+```
+
+### 15 — Offline analysis pipeline: extract unique hostnames, sorted
 
 ```sh
 ./bin/snidump -r big_capture.pcap | awk '{print $NF}' | sort -u
@@ -268,6 +296,138 @@ With JSON output, use `jq`:
 ./bin/snidump -jq -r big_capture.pcap \
   | jq -r '.host' | sort -u > unique_hosts.txt
 ```
+
+---
+
+## Running on pfSense
+
+pfSense Community Edition (2.8+) runs on FreeBSD 15 with a ZFS root
+filesystem.  The notes below are based on a tested CE 2.8.1 installation.
+
+### Building for pfSense
+
+pfSense ships **no compiler**.  Build on a separate FreeBSD 15 machine
+(or VM) matching the pfSense architecture, then copy the binary over.
+`libpcap` is in the FreeBSD base system; `pcre2` is installed via pkg:
+
+```sh
+# On the FreeBSD 15 build machine:
+sudo pkg install pcre2
+git clone https://github.com/alvarow/snidump.git
+cd snidump
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+
+# Copy to pfSense (run from build machine):
+scp bin/snidump bin/snidump_noether root@pfsense:/usr/local/bin/
+```
+
+Pre-built binaries for supported platforms are kept in `builds/` in the
+repository.
+
+### Installing the rc.d service
+
+```sh
+# On pfSense (as root):
+cp /path/to/snidump.rc /usr/local/etc/rc.d/snidump
+chmod +x /usr/local/etc/rc.d/snidump
+mkdir -p /var/log/snidump
+```
+
+### Persisting the configuration
+
+`/etc/rc.conf` on pfSense is a stub managed by the system — it contains
+only `# THIS FILE DOES NOTHING, DO NOT MAKE CONFIG CHANGES HERE`.
+Use `/etc/rc.conf.local` instead; pfSense never touches it:
+
+```sh
+# On pfSense (as root):
+echo 'snidump_enable="YES"'     >> /etc/rc.conf.local
+echo 'snidump_interface="igb1.20"' >> /etc/rc.conf.local
+
+service snidump start
+service snidump status
+```
+
+### Log rotation
+
+`/etc/newsyslog.conf.d/` exists on pfSense 2.8 and is the correct place
+for third-party log rotation config — it survives upgrades unlike the
+main `newsyslog.conf`:
+
+```sh
+cat > /etc/newsyslog.conf.d/snidump.conf << 'EOF'
+/var/log/snidump/hosts.jsonl  root:wheel  640  30  *  @T00  CZ
+EOF
+```
+
+### Interfaces
+
+pfSense uses FreeBSD interface names.  Common examples:
+
+| Interface | Typical use |
+|-----------|-------------|
+| `igb0` | WAN |
+| `igb1` | LAN trunk (parent of VLANs) |
+| `igb1.20` | VLAN 20 sub-interface |
+| `tun_wg0` | WireGuard VPN tunnel |
+| `gif0` | GIF tunnel |
+
+VLAN sub-interfaces deliver full Ethernet frames to pcap (`DLT_EN10MB`),
+so use `snidump` (not `snidump_noether`) on them.
+Tunnel interfaces (`tun_wg0`, `gif0`) are raw-IP (`DLT_RAW`) — use
+`snidump_noether`.
+
+Promiscuous mode (`-p`) is generally not needed on pfSense because the
+firewall processes all traffic regardless.
+
+### pfSense examples
+
+Monitor all outbound hostnames on VLAN20 (`192.168.20.0/24`), logged as
+JSON:
+
+```sh
+snidump -q -j -i igb1.20 >> /var/log/snidump/hosts.jsonl
+```
+
+The same result using the parent interface with an explicit source-subnet
+filter (useful if you want one process to cover multiple VLANs):
+
+```sh
+snidump -q -j -i igb1 \
+  -f '(ip or ip6) and tcp and (tcp[tcpflags] & tcp-push == tcp-push) \
+      and (dst port 80 or dst port 443) and src net 192.168.20.0/24' \
+  >> /var/log/snidump/hosts.jsonl
+```
+
+Monitor VLAN20 and stream to syslog in real time:
+
+```sh
+snidump -q -j -i igb1.20 | logger -t snidump -p local0.info
+```
+
+Watch live from a shell (no daemon, Ctrl-C to stop):
+
+```sh
+snidump -i igb1.20
+```
+
+Extract the top 10 most-visited TLS hostnames from today's log:
+
+```sh
+jq -r 'select(.proto=="TLS") | .host' /var/log/snidump/hosts.jsonl \
+  | sort | uniq -c | sort -rn | head -10
+```
+
+### Notes specific to pfSense
+
+- **`/var/log` is persistent** on modern pfSense (ZFS dataset) — logs
+  survive reboots.
+- **No compiler on the box** — always build on a separate FreeBSD 15
+  system and copy the binary.
+- **Binaries may be lost on major version upgrades** — reinstall after
+  upgrading pfSense.
+- **Shell is `tcsh`** — if writing inline shell scripts on the pfSense
+  console, use `sh -c '...'` or invoke scripts directly.
 
 ---
 
