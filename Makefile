@@ -1,4 +1,4 @@
-.PHONY: all debug clean install uninstall
+.PHONY: all debug clean install uninstall check-deps
 
 # Compiler — defaults to gcc; override from command line if needed:
 #   FreeBSD : make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
@@ -22,9 +22,23 @@ INSTALL_PROGRAM ?= $(INSTALL) -m 755
 INSTALL_DATA    ?= $(INSTALL) -m 644
 INSTALL_DIR     ?= $(INSTALL) -d -m 755
 
-all: bin/snidump bin/snidump_noether
+check-deps:
+	@printf '#include <pcap/pcap.h>\nint main(void){return 0;}\n' | \
+	  $(CC) $(CFLAGS) -x c - $(LDFLAGS) -lpcap -o /dev/null 2>/dev/null || \
+	  { echo "[ERROR] libpcap not found."; \
+	    echo "        Debian/Ubuntu : sudo apt install libpcap-dev"; \
+	    echo "        FreeBSD/pfSense: libpcap is in the base system"; \
+	    exit 1; }
+	@printf '#define PCRE2_CODE_UNIT_WIDTH 8\n#include <pcre2.h>\nint main(void){return 0;}\n' | \
+	  $(CC) $(CFLAGS) -x c - $(LDFLAGS) -lpcre2-8 -o /dev/null 2>/dev/null || \
+	  { echo "[ERROR] libpcre2 not found."; \
+	    echo "        Debian/Ubuntu : sudo apt install libpcre2-dev"; \
+	    echo "        FreeBSD/pfSense: sudo pkg install pcre2"; \
+	    exit 1; }
 
-debug: bin/snidump_dbg bin/snidump_noether_dbg
+all: check-deps bin/snidump bin/snidump_noether
+
+debug: check-deps bin/snidump_dbg bin/snidump_noether_dbg
 
 bin/snidump: src/*
 	mkdir -p bin && \

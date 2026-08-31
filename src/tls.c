@@ -780,7 +780,11 @@ uint32_t tls_process_record(uint8_t *payload, uint32_t payload_length)
 	size_t must_read_bytes;
 	size_t read_bytes_checkpoint;
 
-	struct read_bytes_ctx ctx;
+	/* static: tls_process_record is non-reentrant (all parsing structs are
+	 * file-scope); making ctx static silences the -Wdangling-pointer warning
+	 * from GCC 12+ which objects to a static pointer (tls_in) holding the
+	 * address of a local variable across function calls. */
+	static struct read_bytes_ctx ctx;
 
 	read_bytes_checkpoint = 0;
 
