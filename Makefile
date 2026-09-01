@@ -101,6 +101,10 @@ uninstall:
 # Build the pfSense .pkg. Requires a FreeBSD 15 amd64 build environment.
 # Binaries must already be in builds/amd64/freebsd-15/ before running this.
 pkg-build:
+	@test "$$(uname -s)" = "FreeBSD" || \
+	  { echo "[ERROR] pkg-build must run on FreeBSD 15 (BSD make + ports tree required)."; \
+	    echo "        Run this target from a FreeBSD 15 VM or jail."; \
+	    echo "        See docs/freebsd-build-vm.md for build VM setup."; exit 1; }
 	@test -f builds/amd64/freebsd-15/snidump || \
 	  { echo "[ERROR] builds/amd64/freebsd-15/snidump not found."; \
 	    echo "        Compile on a FreeBSD 15 amd64 machine first."; exit 1; }

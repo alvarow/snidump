@@ -11,8 +11,8 @@
 # build VM with KVM on Ubuntu.
 
 .PHONY: all
-all:
+all %:
 	@echo "[ERROR] pkg/Makefile is a FreeBSD port Makefile (BSD make + ports tree required)."
-	@echo "        On Linux, run 'make pkg-build' from the repo root on a FreeBSD 15 machine."
+	@echo "        On Linux, run make pkg-build from the repo root on a FreeBSD 15 machine."
 	@echo "        See docs/freebsd-build-vm.md for build VM setup."
 	@exit 1
