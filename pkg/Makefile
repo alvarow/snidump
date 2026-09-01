@@ -1,6 +1,6 @@
 # pkg/Makefile
 PORTNAME=	pfSense-pkg-snidump
-PORTVERSION!=	cat ${.CURDIR}/../VERSION
+PORTVERSION!=	cat ${.CURDIR}/../VERSION | tr -d '[:space:]'
 CATEGORIES=	security
 MAINTAINER=	alvaro@example.com
 COMMENT=	Extracts TLS SNI and HTTP Host headers from live traffic
