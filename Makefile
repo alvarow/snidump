@@ -104,6 +104,7 @@ pkg-build:
 	@test -f builds/amd64/freebsd-15/snidump || \
 	  { echo "[ERROR] builds/amd64/freebsd-15/snidump not found."; \
 	    echo "        Compile on a FreeBSD 15 amd64 machine first."; exit 1; }
+	mkdir -p pkg/files/usr/local/bin pkg/files/usr/local/etc/rc.d
 	cp builds/amd64/freebsd-15/snidump         pkg/files/usr/local/bin/snidump
 	cp builds/amd64/freebsd-15/snidump_noether pkg/files/usr/local/bin/snidump_noether
 	cp contrib/snidump.rc pkg/files/usr/local/etc/rc.d/snidump
