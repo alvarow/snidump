@@ -160,6 +160,60 @@ would use a self-pipe or `pcap_setnonblock` with a manual select loop.
 
 ---
 
+## Building the pfSense package
+
+`make pkg-build` requires BSD make and FreeBSD's `bsd.port.mk` (ports tree).
+It cannot run on Linux — FreeBSD containers do not work inside a Linux Docker
+host because they require the FreeBSD kernel ABI.
+
+### Option 1 — KVM VM on Linux (recommended)
+
+See `docs/freebsd-build-vm.md` for full instructions. Short version:
+
+```sh
+# On the FreeBSD 15 VM, in the repo:
+pkg install -y pcre2
+make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+cp bin/snidump bin/snidump_noether builds/amd64/freebsd-15/
+make pkg-build
+```
+
+Copy the result back:
+
+```sh
+scp root@<vm-ip>:snidump/pkg/work/pkg/pfSense-pkg-snidump-*.pkg .
+```
+
+### Option 2 — GitHub Actions (CI)
+
+The `vmactions/freebsd-vm` action provides a real FreeBSD VM in GitHub's
+runners. Add `.github/workflows/pkg.yml`:
+
+```yaml
+name: Build pfSense package
+on: [push, workflow_dispatch]
+jobs:
+  pkg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.0"
+          usesh: true
+          prepare: pkg install -y pcre2
+          run: |
+            make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
+            cp bin/snidump bin/snidump_noether builds/amd64/freebsd-15/
+            make pkg-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pfSense-pkg-snidump
+          path: pkg/work/pkg/*.pkg
+```
+
+---
+
 ## Bugs fixed
 
 | Area | Bug |
