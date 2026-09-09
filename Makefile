@@ -2,10 +2,6 @@
 
 VERSION != cat VERSION 2>/dev/null | tr -d '\n\r '
 
-# Default goal — must be declared before check-deps so that bare 'make'
-# builds the binaries rather than stopping after the dependency check.
-.DEFAULT_GOAL := all
-
 # Compiler — defaults to gcc; override from command line if needed:
 #   FreeBSD : make CC=clang CFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib"
 CC      = gcc
@@ -28,6 +24,11 @@ INSTALL_PROGRAM ?= $(INSTALL) -m 755
 INSTALL_DATA    ?= $(INSTALL) -m 644
 INSTALL_DIR     ?= $(INSTALL) -d -m 755
 
+# all is the first real target — default for both GNU make and BSD make.
+all: check-deps bin/snidump bin/snidump_noether
+
+debug: check-deps bin/snidump_dbg bin/snidump_noether_dbg
+
 check-deps:
 	@printf '#include <pcap/pcap.h>\nint main(void){return 0;}\n' | \
 	  $(CC) $(CFLAGS) -x c - $(LDFLAGS) -lpcap -o /dev/null 2>/dev/null || \
@@ -41,10 +42,6 @@ check-deps:
 	    echo "        Debian/Ubuntu : sudo apt install libpcre2-dev"; \
 	    echo "        FreeBSD/pfSense: sudo pkg install pcre2"; \
 	    exit 1; }
-
-all: check-deps bin/snidump bin/snidump_noether
-
-debug: check-deps bin/snidump_dbg bin/snidump_noether_dbg
 
 bin/snidump: src/*
 	mkdir -p bin && \
