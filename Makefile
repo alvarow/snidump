@@ -105,12 +105,30 @@ pkg-build:
 	@test -f builds/amd64/freebsd-15/snidump || \
 	  { echo "[ERROR] builds/amd64/freebsd-15/snidump not found."; \
 	    echo "        Compile on a FreeBSD 15 amd64 machine first."; exit 1; }
-	mkdir -p pkg/files/usr/local/bin pkg/files/usr/local/etc/rc.d
-	cp builds/amd64/freebsd-15/snidump         pkg/files/usr/local/bin/snidump
-	cp builds/amd64/freebsd-15/snidump_noether pkg/files/usr/local/bin/snidump_noether
-	cp contrib/snidump.rc pkg/files/usr/local/etc/rc.d/snidump
-	chmod +x pkg/files/usr/local/etc/rc.d/snidump
-	cd pkg && make package
+	# Stage all installed files into pkg/stage/
+	rm -rf pkg/stage
+	mkdir -p pkg/stage/usr/local/bin \
+	         pkg/stage/usr/local/etc/rc.d \
+	         pkg/stage/usr/local/etc/newsyslog.conf.d \
+	         pkg/stage/usr/local/pkg \
+	         pkg/stage/usr/local/www \
+	         pkg/stage/var/log/snidump
+	cp builds/amd64/freebsd-15/snidump         pkg/stage/usr/local/bin/snidump
+	cp builds/amd64/freebsd-15/snidump_noether pkg/stage/usr/local/bin/snidump_noether
+	chmod +x pkg/stage/usr/local/bin/snidump pkg/stage/usr/local/bin/snidump_noether
+	cp pkg/files/usr/local/etc/rc.d/snidump    pkg/stage/usr/local/etc/rc.d/snidump
+	chmod +x pkg/stage/usr/local/etc/rc.d/snidump
+	cp pkg/files/usr/local/etc/newsyslog.conf.d/snidump \
+	   pkg/stage/usr/local/etc/newsyslog.conf.d/snidump
+	cp pkg/snidump.xml                          pkg/stage/usr/local/pkg/snidump.xml
+	cp pkg/files/usr/local/pkg/snidump.inc     pkg/stage/usr/local/pkg/snidump.inc
+	cp pkg/files/usr/local/www/snidump_log.php pkg/stage/usr/local/www/snidump_log.php
+	# Write UCL manifest and create the .pkg (no ports tree required)
+	printf 'name: "pfSense-pkg-snidump"\nversion: "%s"\norigin: "security/pfSense-pkg-snidump"\ncomment: "Extracts TLS SNI and HTTP Host headers from live traffic"\ndesc: "snidump extracts the TLS SNI field from ClientHello messages and the Host header from HTTP/1.1 requests. Supports IPv4, IPv6, live capture, and PCAP files."\nmaintainer: "alvaro@example.com"\nwww: "https://github.com/alvarow/snidump"\nprefix: "/usr/local"\ndeps: {pcre2: {origin: "devel/pcre2", version: "%s"}}\n' \
+	    "$(VERSION)" "$$(pkg query '%v' pcre2 2>/dev/null || echo 0)" > pkg/+MANIFEST
+	mkdir -p pkg/work/pkg
+	pkg create -M pkg/+MANIFEST -r pkg/stage -o pkg/work/pkg/
+	rm -rf pkg/stage pkg/+MANIFEST
 	@echo ""
 	@echo "Package: pkg/work/pkg/pfSense-pkg-snidump-$(VERSION).pkg"
 

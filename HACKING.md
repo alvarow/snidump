@@ -162,9 +162,9 @@ would use a self-pipe or `pcap_setnonblock` with a manual select loop.
 
 ## Building the pfSense package
 
-`make pkg-build` requires BSD make and FreeBSD's `bsd.port.mk` (ports tree).
-It cannot run on Linux — FreeBSD containers do not work inside a Linux Docker
-host because they require the FreeBSD kernel ABI.
+`make pkg-build` requires a FreeBSD 15 amd64 host (uses `pkg create` to
+assemble the `.pkg` — no ports tree needed). It cannot run on Linux —
+FreeBSD containers do not work inside a Linux Docker host.
 
 ### Option 1 — KVM VM on Linux (recommended)
 

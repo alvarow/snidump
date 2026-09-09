@@ -8,4 +8,6 @@ builds/**/snidump_noether_dbg
 
 # pkg staging and build output
 pkg/files/usr/local/bin/
+pkg/stage/
+pkg/+MANIFEST
 pkg/work/
