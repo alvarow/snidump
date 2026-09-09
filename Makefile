@@ -1,6 +1,6 @@
 .PHONY: all debug clean install uninstall check-deps pkg-build
 
-VERSION := $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
+VERSION != cat VERSION 2>/dev/null | tr -d '\n\r '
 
 # Default goal — must be declared before check-deps so that bare 'make'
 # builds the binaries rather than stopping after the dependency check.
