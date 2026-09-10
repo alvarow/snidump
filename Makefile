@@ -123,12 +123,14 @@ pkg-build:
 	cp pkg/snidump.xml                          pkg/stage/usr/local/pkg/snidump.xml
 	cp pkg/files/usr/local/pkg/snidump.inc     pkg/stage/usr/local/pkg/snidump.inc
 	cp pkg/files/usr/local/www/snidump_log.php pkg/stage/usr/local/www/snidump_log.php
-	# Write UCL manifest and create the .pkg (no ports tree required)
+	# Write UCL manifest into a metadata dir; pkg create -m (lowercase) then
+	# auto-discovers all files from the staging root (-r pkg/stage).
+	mkdir -p pkg/meta
 	printf 'name: "pfSense-pkg-snidump"\nversion: "%s"\norigin: "security/pfSense-pkg-snidump"\ncomment: "Extracts TLS SNI and HTTP Host headers from live traffic"\ndesc: "snidump extracts the TLS SNI field from ClientHello messages and the Host header from HTTP/1.1 requests. Supports IPv4, IPv6, live capture, and PCAP files."\nmaintainer: "alvaro@example.com"\nwww: "https://github.com/alvarow/snidump"\nprefix: "/usr/local"\ndeps: {pcre2: {origin: "devel/pcre2", version: "%s"}}\n' \
-	    "$(VERSION)" "$$(pkg query '%v' pcre2 2>/dev/null || echo 0)" > pkg/+MANIFEST
+	    "$(VERSION)" "$$(pkg query '%v' pcre2 2>/dev/null || echo 0)" > pkg/meta/+MANIFEST
 	mkdir -p pkg/work/pkg
-	pkg create -M pkg/+MANIFEST -r pkg/stage -o pkg/work/pkg/
-	rm -rf pkg/stage pkg/+MANIFEST
+	pkg create -m pkg/meta -r pkg/stage -o pkg/work/pkg/
+	rm -rf pkg/stage pkg/meta
 	@echo ""
 	@echo "Package: pkg/work/pkg/pfSense-pkg-snidump-$(VERSION).pkg"
 
