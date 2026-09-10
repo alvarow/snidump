@@ -1,0 +1,9 @@
+bin/snidump
+bin/snidump_noether
+etc/rc.d/snidump
+@dir etc/newsyslog.conf.d
+etc/newsyslog.conf.d/snidump
+pkg/snidump.xml
+pkg/snidump.inc
+www/snidump_log.php
+@dir(root,wheel,0750) /var/log/snidump

@@ -1,0 +1,6 @@
+snidump extracts the Server Name Indication (SNI) field from TLS ClientHello
+messages and the Host header from HTTP/1.1 requests. It captures from a live
+network interface or a PCAP file and outputs plain text, timestamped lines,
+or JSON (one object per line). Supports IPv4 and IPv6.
+
+WWW: https://github.com/alvarow/snidump

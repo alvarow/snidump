@@ -336,3 +336,33 @@ making it appear in `Status > Services` alongside other daemons.
   can automate this.
 - **Shell is `tcsh`** — any inline shell in PHP `exec()` calls or rc scripts
   must be written for `sh`, not `tcsh`.
+
+### arm64 CI build (not yet implemented)
+
+The current GitHub Actions workflow (`.github/workflows/pkg.yml`) builds
+amd64 only. GitHub's free runners are all amd64; arm64 runners require a paid
+plan. Two options when arm64 support is needed:
+
+**Option A — Cross-compile from the amd64 FreeBSD VM** (free)
+
+Inside the `vmactions/freebsd-vm` step, install the aarch64 cross toolchain
+and build with an explicit target:
+
+```sh
+pkg install -y aarch64-unknown-freebsd15.0-binutils llvm
+clang --target=aarch64-unknown-freebsd15 \
+      --sysroot=/usr/local/aarch64-unknown-freebsd15 \
+      -I/usr/local/include -L/usr/local/lib \
+      src/snidump.c src/tls.c src/http.c \
+      -lpcap -lpcre2-8 -o builds/arm64/freebsd-15/snidump
+```
+
+Getting a pcre2 arm64 static lib or cross-sysroot into the right place is
+the fiddly part — fetch it from a FreeBSD arm64 package mirror and unpack
+into the sysroot.
+
+**Option B — GitHub arm64 runner** (paid, straightforward)
+
+Add `ubuntu-24.04-arm` to the workflow matrix. The FreeBSD VM will then run
+natively on arm64 hardware and the build commands are identical to amd64.
+Billed at ~$0.016/min for public repos on GitHub Team/Enterprise.
