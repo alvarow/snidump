@@ -32,9 +32,6 @@ jobs:
             cp bin/snidump bin/snidump_noether builds/amd64/freebsd-15/
             # Build the .pkg
             make pkg-build
-            # Debug: show what was produced
-            ls -lh pkg/work/pkg/
-            pkg info -F pkg/work/pkg/pfSense-pkg-snidump-*.pkg
 
       - name: Upload .pkg artifact
         uses: actions/upload-artifact@v4
