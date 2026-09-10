@@ -28,6 +28,8 @@ jobs:
             make CC=clang \
                  CFLAGS="-I/usr/local/include" \
                  LDFLAGS="-L/usr/local/lib"
+            # Strip debug symbols before packaging
+            strip bin/snidump bin/snidump_noether
             # Stage into the builds directory make pkg-build expects
             cp bin/snidump bin/snidump_noether builds/amd64/freebsd-15/
             # Build the .pkg
