@@ -214,6 +214,72 @@ jobs:
 
 ---
 
+## Go port — research notes
+
+A Go port was evaluated and is feasible but assessed as low ROI for the project
+in its current stable state.
+
+### What maps where
+
+| C | Go equivalent |
+|---|---------------|
+| libpcap + `pcap_loop` | `github.com/google/gopacket/pcap` (cgo wrapper) or `gopacket/pcapgo` for offline `.pcap` files |
+| Ethernet/IP/IPv6/TCP/UDP structs in `snidump.c` | `gopacket` layers — most of the ~600 lines of header structs disappear |
+| `tls.c` — TLS record / ClientHello parser | Hand-ported to Go (gopacket's TLS layer exists but SNI extraction is thin); becomes a `[]byte → string` function, fully unit-testable |
+| `http.c` — HTTP Host parser | Straightforward port; no PCRE dependency needed (`strings`/`bytes` suffice) |
+| `ciphersuites.h` — 66 K-line lookup table | `map[uint16]string` |
+| `__NO_ETHERNET__` compile-time flag | Runtime flag (`-noether`) or separate binary; Go has no equivalent of `#define`-driven dead-code elimination |
+
+### The cgo / cross-compilation constraint
+
+`gopacket/pcap` (live capture) uses cgo to call into `libpcap`. This means:
+
+- Building for a different OS/arch requires a C cross-compiler in `PATH`
+  plus the target's libpcap headers — the same constraint the current C
+  build already has; Go does not remove it.
+- The resulting binary still dynamically links `libpcap.so` on the target.
+- Pure-Go `gopacket/pcapgo` avoids cgo but only handles offline `.pcap`
+  files. Live capture without cgo would require raw-socket code
+  (`AF_PACKET` on Linux, `/dev/bpf` on FreeBSD) — non-trivial and
+  platform-specific.
+
+`CGO_ENABLED=0 GOOS=freebsd go build` does **not** produce a working binary
+for live capture.
+
+### Real gains from a port
+
+- **Memory safety on packet data.** The TLS and HTTP parsers do manual
+  pointer arithmetic over untrusted network bytes. Go's slice bounds
+  checking eliminates that class of bug without runtime cost on the
+  hot path.
+- **Unit-testable parsers.** In the C design, `tls_process_record` and
+  `http_process_request` communicate results via a global function-pointer
+  callback, making them hard to test in isolation. A Go port would let
+  them return values directly; table-driven tests with raw packet bytes
+  become trivial.
+- **Correct JSON output.** The current `json_write_escaped` is hand-rolled.
+  `encoding/json` handles escaping and edge cases correctly out of the box.
+- **Reproducible builds.** `go.mod` pins all dependencies except the system
+  libpcap, which is already a runtime dep anyway.
+
+### Gains that do not apply here
+
+- **Performance** — SNI extraction is I/O-bound; C vs Go throughput
+  difference is negligible.
+- **Cross-compilation** — cgo closes that door for live capture (see above).
+- **Concurrency** — `pcap_loop` is inherently serial; goroutines do not
+  help the core packet path.
+- **Smaller code** — `gopacket` is a large transitive dependency; the net
+  line-count likely stays similar.
+
+### Verdict
+
+Low ROI while the parsers are stable. Worth revisiting if the TLS parser
+needs significant extension (ECH, QUIC Initial decryption) where Go's
+testability and safety would pay off faster.
+
+---
+
 ## Bugs fixed
 
 | Area | Bug |
